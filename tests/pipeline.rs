@@ -4,16 +4,16 @@
 //! input. Runs in a second or two, everywhere.
 
 mod common;
-use browsertabicl::crypt::{new_key, seal_file, Sealed};
-use browsertabicl::fit::Kv;
-use browsertabicl::model::{Load, Model};
-use browsertabicl::predict::{IclWeights, PredictOpts, Stats};
-use browsertabicl::store::{Bundle, MemStore};
-use browsertabicl::table::*;
-use browsertabicl::warm::Warm;
 use common::*;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
+use tabicl_anywhere::crypt::{new_key, seal_file, Sealed};
+use tabicl_anywhere::fit::Kv;
+use tabicl_anywhere::model::{Load, Model};
+use tabicl_anywhere::predict::{IclWeights, PredictOpts, Stats};
+use tabicl_anywhere::store::{Bundle, MemStore};
+use tabicl_anywhere::table::*;
+use tabicl_anywhere::warm::Warm;
 
 fn fit_mem(m: &Model, t: &Table, o: &ClassifierOpts, extra: &[(&str, &[u8])]) -> Vec<u8> {
     let out = MemStore::new();
@@ -85,7 +85,7 @@ fn streamed_weights_without_layer_norm_biases() {
     let keep: Vec<_> = src.entries.iter().filter(|e| !(e.name.starts_with("icl_predictor.tf_icl") && e.name.ends_with("norm1.bias"))).cloned().collect();
     let ents: Vec<(&str, &str, Vec<usize>)> = keep.iter().map(|e| (e.name.as_str(), e.dtype.as_str(), e.dims.clone())).collect();
     let out = MemStore::new();
-    let w = browsertabicl::store::BundleWriter::create_on(Box::new(out.clone()), &ents).unwrap();
+    let w = tabicl_anywhere::store::BundleWriter::create_on(Box::new(out.clone()), &ents).unwrap();
     keep.iter().for_each(|e| w.write_bytes(&e.name, &src.bytes(&e.name).unwrap()).unwrap());
     drop(w);
     let bytes = out.bytes();
@@ -208,7 +208,7 @@ fn half_size_weights_stay_close() {
     let (m, t, o) = setup();
     let want = proba(&m, &mut IclWeights::Resident, &bytes_bundle(fit_mem(&m, &t, &o, &[])), &t, &PredictOpts::default());
     let ckpt = std::fs::read(root().join("tests/data/tiny-clf.ckpt")).unwrap();
-    let half = bytes_bundle(browsertabicl::ckpt::bundle_bytes(ckpt, true).unwrap());
+    let half = bytes_bundle(tabicl_anywhere::ckpt::bundle_bytes(ckpt, true).unwrap());
     let hm = model(&half);
     let got = proba(&hm, &mut IclWeights::Resident, &bytes_bundle(fit_mem(&hm, &t, &o, &[])), &t, &PredictOpts::default());
     // only tensors of 4096 numbers or more are narrowed, and the tiny model has none: so nothing may change at

@@ -5,7 +5,7 @@
 // PyTorch checkpoint, exact comparison) and the real 16-bit weights in docs/weights on a small table. Build first
 // with tools/build-wasm.sh.
 const fs = require("fs"), path = require("path");
-const { Weights, combineProba, defaultTemperature, toBundle, calibrate, memoryBytes } = require("../pkg/node/browsertabicl_wasm.js");
+const { Weights, combineProba, defaultTemperature, toBundle, calibrate, memoryBytes } = require("../pkg/node/tabicl_anywhere_wasm.js");
 const root = path.join(__dirname, "..");
 const fx = path.join(root, "fixtures"), small = path.join(root, "tests", "data");
 const full = fs.existsSync(path.join(fx, "classifier-v2.tirs"));

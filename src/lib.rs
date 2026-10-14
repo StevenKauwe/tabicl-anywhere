@@ -1,4 +1,4 @@
-//! BrowserTabICL: TabICL (v2) on a CPU in safe Rust.
+//! tabicl-anywhere: TabICL (v2) on a CPU in safe Rust.
 //!
 //! * `fit` runs a training table through the network once and writes a cache bundle.
 //! * `predict` streams that bundle (from a file, bytes in memory, or any byte-range source) to label new rows,

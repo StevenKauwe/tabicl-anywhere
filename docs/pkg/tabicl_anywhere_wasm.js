@@ -1,4 +1,4 @@
-/* @ts-self-types="./browsertabicl_wasm.d.ts" */
+/* @ts-self-types="./tabicl_anywhere_wasm.d.ts" */
 
 /**
  * A graphics card, through the browser's WebGPU: the device, its tier for fitted models (one tenant: this
@@ -1330,7 +1330,7 @@ function __wbg_get_imports() {
     };
     return {
         __proto__: null,
-        "./browsertabicl_wasm_bg.js": import0,
+        "./tabicl_anywhere_wasm_bg.js": import0,
     };
 }
 
@@ -1771,7 +1771,7 @@ async function __wbg_init(module_or_path) {
     }
 
     if (module_or_path === undefined) {
-        module_or_path = new URL('browsertabicl_wasm_bg.wasm', import.meta.url);
+        module_or_path = new URL('tabicl_anywhere_wasm_bg.wasm', import.meta.url);
     }
     const imports = __wbg_get_imports();
 

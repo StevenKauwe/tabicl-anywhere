@@ -1,35 +1,35 @@
-//! Command line for BrowserTabICL.
+//! Command line for tabicl-anywhere.
 //!
 //! Once, to turn a published checkpoint into this crate's weight file:
 //!
-//!   browsertabicl convert tabicl-classifier-v2-20260212.ckpt classifier-v2.tirs
-//!   browsertabicl convert IN OUT --half          half-size weights (16-bit floats); IN is a .ckpt or a .tirs
-//!   browsertabicl split FILE PREFIX [--max-mb 14]   cut into PREFIX.00.bin ... plus PREFIX.json (for web hosting)
-//!   browsertabicl join PREFIX.json OUT           put them back together
+//!   tabicl-anywhere convert tabicl-classifier-v2-20260212.ckpt classifier-v2.tirs
+//!   tabicl-anywhere convert IN OUT --half          half-size weights (16-bit floats); IN is a .ckpt or a .tirs
+//!   tabicl-anywhere split FILE PREFIX [--max-mb 14]   cut into PREFIX.00.bin ... plus PREFIX.json (for web hosting)
+//!   tabicl-anywhere join PREFIX.json OUT           put them back together
 //!
 //! Everyday use, on CSV files with a header row:
 //!
-//!   browsertabicl fit WEIGHTS train.csv --target COLUMN model.tirs   [--estimators 8] [--kv f32|i16|i8] [--chunk ROWS]
-//!   browsertabicl predict WEIGHTS model.tirs new.csv                 [--key KEYFILE] [--resident] [--key-threads N] [--stats]
+//!   tabicl-anywhere fit WEIGHTS train.csv --target COLUMN model.tirs   [--estimators 8] [--kv f32|i16|i8] [--chunk ROWS]
+//!   tabicl-anywhere predict WEIGHTS model.tirs new.csv                 [--key KEYFILE] [--resident] [--key-threads N] [--stats]
 //!        prints CSV: the predicted label, then one probability column per class
-//!   browsertabicl keygen KEYFILE                                     write a new random 32-byte key (hex)
-//!   browsertabicl seal model.tirs model.sealed KEYFILE               encrypt a fitted model; predict reads it with --key
+//!   tabicl-anywhere keygen KEYFILE                                     write a new random 32-byte key (hex)
+//!   tabicl-anywhere seal model.tirs model.sealed KEYFILE               encrypt a fitted model; predict reads it with --key
 //!
 //! Timing on already-numeric tables (no preprocessing, one ensemble member):
 //!
-//!   browsertabicl bench-synth ROWS TEST FEATURES CLASSES table.tirs
-//!   browsertabicl bench-fit WEIGHTS table.tirs cache.tirs            [--kv ...] [--chunk ROWS]
-//!   browsertabicl bench-predict WEIGHTS cache.tirs table.tirs        [--rows N] [--one-at-a-time] [--resident] [--key KEYFILE]
+//!   tabicl-anywhere bench-synth ROWS TEST FEATURES CLASSES table.tirs
+//!   tabicl-anywhere bench-fit WEIGHTS table.tirs cache.tirs            [--kv ...] [--chunk ROWS]
+//!   tabicl-anywhere bench-predict WEIGHTS cache.tirs table.tirs        [--rows N] [--one-at-a-time] [--resident] [--key KEYFILE]
 //!                                                             [--key-threads N] [--io BYTES] [--stages] [--against OTHER]
 //!
 //! Everywhere: --threads N sets the size of the thread pool.
 #![forbid(unsafe_code)]
 
-use browsertabicl::fit::{fit_raw, raw_entries, FitOpts};
-use browsertabicl::model::{Load, Model};
-use browsertabicl::predict::{predict_raw, Cache, IclWeights, PredictOpts, Stats};
-use browsertabicl::store::{Bundle, BundleWriter};
 use std::time::Instant;
+use tabicl_anywhere::fit::{fit_raw, raw_entries, FitOpts};
+use tabicl_anywhere::model::{Load, Model};
+use tabicl_anywhere::predict::{predict_raw, Cache, IclWeights, PredictOpts, Stats};
+use tabicl_anywhere::store::{Bundle, BundleWriter};
 
 /// Peak and current resident memory of this process in MB, from the kernel's own accounting (Linux).
 fn rss_mb() -> (f64, f64) {
@@ -38,7 +38,7 @@ fn rss_mb() -> (f64, f64) {
     (get("VmHWM:"), get("VmRSS:"))
 }
 
-const USAGE: &str = "usage: browsertabicl convert|split|join|fit|predict|keygen|seal|bench-...   (see the top of src/bin/browsertabicl.rs)";
+const USAGE: &str = "usage: tabicl-anywhere convert|split|join|fit|predict|keygen|seal|bench-...   (see the top of src/bin/tabicl-anywhere.rs)";
 
 fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
@@ -48,29 +48,29 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 fn open_model(path: &str, args: &[String]) -> std::io::Result<Bundle> {
     match flag(args, "--key") {
         None => Bundle::open(path),
-        Some(k) => Bundle::from_source(Box::new(browsertabicl::crypt::Sealed::open(std::fs::File::open(path)?, &browsertabicl::crypt::read_key(k)?)?)),
+        Some(k) => Bundle::from_source(Box::new(tabicl_anywhere::crypt::Sealed::open(std::fs::File::open(path)?, &tabicl_anywhere::crypt::read_key(k)?)?)),
     }
 }
 
-fn kv_flag(args: &[String]) -> browsertabicl::fit::Kv {
+fn kv_flag(args: &[String]) -> tabicl_anywhere::fit::Kv {
     match flag(args, "--kv").as_deref() {
-        None | Some("f32") => browsertabicl::fit::Kv::F32,
-        Some("i16") => browsertabicl::fit::Kv::I16,
-        Some("i8") => browsertabicl::fit::Kv::I8,
+        None | Some("f32") => tabicl_anywhere::fit::Kv::F32,
+        Some("i16") => tabicl_anywhere::fit::Kv::I16,
+        Some("i8") => tabicl_anywhere::fit::Kv::I8,
         Some(o) => panic!("--kv f32|i16|i8, not {o}"),
     }
 }
 
 /// `--gpu`: do the heavy part of fitting on the graphics card (needs a build with `--features gpu`).
-fn accel(args: &[String]) -> std::io::Result<browsertabicl::fit::Accel> {
+fn accel(args: &[String]) -> std::io::Result<tabicl_anywhere::fit::Accel> {
     if !args.iter().any(|a| a == "--gpu") {
         return Ok(Default::default());
     }
     #[cfg(feature = "gpu")]
     let card = {
-        let g = browsertabicl::gpu::Gpu::new()?;
+        let g = tabicl_anywhere::gpu::Gpu::new()?;
         eprintln!("using {}", g.name);
-        Ok(browsertabicl::fit::Accel(Some(std::sync::Arc::new(g))))
+        Ok(tabicl_anywhere::fit::Accel(Some(std::sync::Arc::new(g))))
     };
     #[cfg(not(feature = "gpu"))]
     let card = Err(std::io::Error::other("this build has no graphics-card support; rebuild with --features gpu"));
@@ -126,7 +126,7 @@ fn main() -> std::io::Result<()> {
                 opts.mem_budget = v.parse::<usize>().expect("--mem MEGABYTES") << 20;
             }
             let yf: Vec<f32> = y.iter().map(|v| *v as f32).collect();
-            let plan = browsertabicl::fit::Plan::new(&m, &yf, classes);
+            let plan = tabicl_anywhere::fit::Plan::new(&m, &yf, classes);
             let ents = raw_entries(&m, "", rows, feats, &opts, &plan);
             let ents: Vec<(&str, &str, Vec<usize>)> = ents.iter().map(|(a, b, c)| (a.as_str(), b.as_str(), c.clone())).collect();
             let w = BundleWriter::create(&args[3], &ents)?;
@@ -156,7 +156,7 @@ fn main() -> std::io::Result<()> {
             let single = args.iter().any(|a| a == "--one-at-a-time");
             opts.rows_per_pass = if single { 1 } else { n };
             // --warm MB: keep up to that much of the cache in memory and predict twice, to show cold against warm
-            let warm = flag(&args, "--warm").map(|v| browsertabicl::warm::Warm::new(v.parse::<usize>().expect("--warm MEGABYTES") << 20, usize::MAX, true));
+            let warm = flag(&args, "--warm").map(|v| tabicl_anywhere::warm::Warm::new(v.parse::<usize>().expect("--warm MEGABYTES") << 20, usize::MAX, true));
             if let Some(tier) = &warm {
                 opts.warm = Some(tier.handle("bench", &args[2]));
                 let t = Instant::now();
@@ -169,7 +169,7 @@ fn main() -> std::io::Result<()> {
             let mut card = None;
             #[cfg(feature = "gpu")]
             if let Some(mb) = flag(&args, "--card") {
-                use browsertabicl::gpu::{Gpu, GpuWeights, VramTier};
+                use tabicl_anywhere::gpu::{Gpu, GpuWeights, VramTier};
                 let gpu = std::sync::Arc::new(Gpu::new()?);
                 if let Some(w) = flag(&args, "--work") {
                     gpu.set_work_budget(w.parse::<usize>().expect("--work MEGABYTES") << 20);
@@ -241,8 +241,8 @@ fn main() -> std::io::Result<()> {
             );
         }
         Some("fit") => {
-            use browsertabicl::csv::{parse, Schema};
-            use browsertabicl::table::{fit_classifier_with, ClassifierOpts};
+            use tabicl_anywhere::csv::{parse, Schema};
+            use tabicl_anywhere::table::{fit_classifier_with, ClassifierOpts};
             let target = flag(&args, "--target").expect("--target COLUMN");
             let pos: Vec<&String> = {
                 let mut skip = false;
@@ -274,7 +274,7 @@ fn main() -> std::io::Result<()> {
                 if let Some(v) = flag(&args, "--estimators") {
                     opts.n_estimators = v.parse().expect("--estimators N");
                 }
-                browsertabicl::table::fit_regressor_with(&m, &x, &y, n, h, out, &opts, &[("table/schema", schema.to_text().as_bytes())])?;
+                tabicl_anywhere::table::fit_regressor_with(&m, &x, &y, n, h, out, &opts, &[("table/schema", schema.to_text().as_bytes())])?;
                 eprintln!(
                     "fitted regression on {n} rows, {h} features, {} ensemble members in {:.1} s; {out} is {:.0} MB; peak memory {:.0} MB",
                     opts.n_estimators,
@@ -306,8 +306,8 @@ fn main() -> std::io::Result<()> {
             );
         }
         Some("predict") => {
-            use browsertabicl::csv::{parse, Schema};
-            use browsertabicl::table::Classifier;
+            use tabicl_anywhere::csv::{parse, Schema};
+            use tabicl_anywhere::table::Classifier;
             let resident = args.iter().any(|a| a == "--resident");
             let wb = Bundle::open(&args[1])?;
             let m = Model::load(&wb, if resident { Load::Predict } else { Load::PredictStreamed })?;
@@ -323,7 +323,7 @@ fn main() -> std::io::Result<()> {
             let st = Stats::default();
             let t0 = Instant::now();
             if m.max_classes == 0 {
-                let reg = browsertabicl::table::Regressor::open(&cb)?;
+                let reg = tabicl_anywhere::table::Regressor::open(&cb)?;
                 let r = reg.predict(&m, &mut w, &x, n, &[0.05, 0.95], &opts, &st)?;
                 let mut out = String::from("prediction,median,q05,q95");
                 for i in 0..n {
@@ -351,8 +351,8 @@ fn main() -> std::io::Result<()> {
         }
         Some("bench-kern") => {
             // how fast the inner loops run on this machine, in billions of multiply-adds per second
-            use browsertabicl::kern::*;
-            use browsertabicl::with_simd;
+            use tabicl_anywhere::kern::*;
+            use tabicl_anywhere::with_simd;
             let time = |name: &str, flops: f64, f: &mut dyn FnMut()| {
                 let t = Instant::now();
                 let mut n = 0u64;
@@ -391,8 +391,8 @@ fn main() -> std::io::Result<()> {
             time("gelu over 256", 256.0, &mut || with_simd!(|_simd| [g: &'a mut [f32]] -> () { g.iter_mut().for_each(|v| *v = 0.3); gelu(g) }));
         }
         Some("bench-attention") => {
-            // browsertabicl bench-attention WEIGHTS cache.tirs table.tirs [--rows N]: how few training rows carry the attention
-            use browsertabicl::predict::{attention_profile, embed, represent};
+            // tabicl-anywhere bench-attention WEIGHTS cache.tirs table.tirs [--rows N]: how few training rows carry the attention
+            use tabicl_anywhere::predict::{attention_profile, embed, represent};
             let m = Model::load(&Bundle::open(&args[1])?, Load::Predict)?;
             let cb = Bundle::open(&args[2])?;
             let cache = Cache::open(&cb, "")?;
@@ -415,7 +415,7 @@ fn main() -> std::io::Result<()> {
         Some("convert") => {
             // IN is a published checkpoint or an existing weight file; --half stores large tensors in 16 bits
             let half = args.iter().any(|a| a == "--half");
-            let out = browsertabicl::ckpt::bundle_bytes(std::fs::read(&args[1])?, half)?;
+            let out = tabicl_anywhere::ckpt::bundle_bytes(std::fs::read(&args[1])?, half)?;
             std::fs::write(&args[2], &out)?;
             eprintln!("wrote {}: {:.1} MB{}", args[2], out.len() as f64 / 1e6, if half { ", large tensors as 16-bit floats" } else { "" });
         }
@@ -425,23 +425,23 @@ fn main() -> std::io::Result<()> {
             let max = flag(&args, "--max-mb").map(|v| v.parse::<usize>().expect("--max-mb N")).unwrap_or(14) << 20;
             let base = std::path::Path::new(&args[2]).file_name().expect("PREFIX names a file").to_string_lossy().into_owned();
             let mut listed = Vec::new();
-            for (i, part) in browsertabicl::store::split_parts(&bytes, max).iter().enumerate() {
+            for (i, part) in tabicl_anywhere::store::split_parts(&bytes, max).iter().enumerate() {
                 std::fs::write(format!("{}.{i:02}.bin", args[2]), part)?;
                 listed.push((format!("{base}.{i:02}.bin"), part.len()));
             }
-            std::fs::write(format!("{}.json", args[2]), browsertabicl::store::parts_manifest(bytes.len(), &listed))?;
+            std::fs::write(format!("{}.json", args[2]), tabicl_anywhere::store::parts_manifest(bytes.len(), &listed))?;
             eprintln!("wrote {} parts of at most {} MB and {}.json", listed.len(), max >> 20, args[2]);
         }
         Some("join") => {
             // join PREFIX.json OUT: the inverse of split, checking every part's length and the total
             let text = std::fs::read_to_string(&args[1])?;
             let dir = std::path::Path::new(&args[1]).parent().unwrap_or(std::path::Path::new("."));
-            let out = browsertabicl::store::join_parts(&text, |name| std::fs::read(dir.join(name)))?;
+            let out = tabicl_anywhere::store::join_parts(&text, |name| std::fs::read(dir.join(name)))?;
             std::fs::write(&args[2], &out)?;
             eprintln!("wrote {}: {} bytes", args[2], out.len());
         }
         Some("keygen") => {
-            let key = browsertabicl::crypt::new_key()?;
+            let key = tabicl_anywhere::crypt::new_key()?;
             let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
             // readable by its owner only (where the platform has such permissions), and never over an existing key
             let mut f = std::fs::File::options();
@@ -452,7 +452,7 @@ fn main() -> std::io::Result<()> {
             eprintln!("wrote a new key to {}; keep it safe: without it a sealed model cannot be read", args[1]);
         }
         Some("seal") => {
-            browsertabicl::crypt::seal_file(&args[1], &args[2], &browsertabicl::crypt::read_key(&args[3])?)?;
+            tabicl_anywhere::crypt::seal_file(&args[1], &args[2], &tabicl_anywhere::crypt::read_key(&args[3])?)?;
             eprintln!("sealed {} into {}", args[1], args[2]);
         }
         None | Some("help" | "--help" | "-h") => eprintln!("{USAGE}"),

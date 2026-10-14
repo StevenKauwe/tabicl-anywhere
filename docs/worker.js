@@ -12,7 +12,7 @@
 // Messages in:  { id, op, ...arguments }
 // Messages out: { id, ok: true, result }  or  { id, ok: false, error, fatal }
 //               (fatal: this worker's engine is no longer usable, e.g. it ran out of memory; start a new one)
-import init, * as engine from "./pkg/browsertabicl_wasm.js";
+import init, * as engine from "./pkg/tabicl_anywhere_wasm.js";
 
 let started = null;
 const held = {}; // "classifier" | "regressor" -> Weights

@@ -1,7 +1,7 @@
-# BrowserTabICL
+# tabicl-anywhere
 
-[![CI](https://github.com/StevenKauwe/browsertabicl/actions/workflows/ci.yml/badge.svg)](https://github.com/StevenKauwe/browsertabicl/actions/workflows/ci.yml)
-[![Dependencies](https://github.com/StevenKauwe/browsertabicl/actions/workflows/audit.yml/badge.svg)](https://github.com/StevenKauwe/browsertabicl/actions/workflows/audit.yml)
+[![CI](https://github.com/StevenKauwe/tabicl-anywhere/actions/workflows/ci.yml/badge.svg)](https://github.com/StevenKauwe/tabicl-anywhere/actions/workflows/ci.yml)
+[![Dependencies](https://github.com/StevenKauwe/tabicl-anywhere/actions/workflows/audit.yml/badge.svg)](https://github.com/StevenKauwe/tabicl-anywhere/actions/workflows/audit.yml)
 [![Licence: BSD-3-Clause](https://img.shields.io/badge/licence-BSD--3--Clause-blue.svg)](LICENSE)
 [![Rust 1.90+](https://img.shields.io/badge/rust-1.90%2B-orange.svg)](Cargo.toml)
 
@@ -18,21 +18,21 @@ browser as WebAssembly. The published PyTorch implementation is used only as the
 
 ## Try it in your browser
 
-https://stevenkauwe.github.io/browsertabicl/ fits a model on your own CSV table and predicts new rows, entirely in
+**BrowserTabICL**, at https://stevenkauwe.github.io/tabicl-anywhere/, fits a model on your own CSV table and predicts new rows, entirely in
 your browser; nothing is uploaded. GitHub Pages serves it from `docs/` on `main`, which `tools/deploy-docs.sh`
 rebuilds from `site/` (see `site/README.md`).
 
 ## Everyday use
 
 ```
-browsertabicl convert tabicl-classifier-v2-20260212.ckpt classifier-v2.tirs     # once; no Python needed
+tabicl-anywhere convert tabicl-classifier-v2-20260212.ckpt classifier-v2.tirs     # once; no Python needed
 
-browsertabicl fit classifier-v2.tirs train.csv --target grade model.tirs --kv i16
-browsertabicl predict classifier-v2.tirs model.tirs new.csv --stats > predictions.csv
+tabicl-anywhere fit classifier-v2.tirs train.csv --target grade model.tirs --kv i16
+tabicl-anywhere predict classifier-v2.tirs model.tirs new.csv --stats > predictions.csv
 
-browsertabicl keygen key.txt
-browsertabicl seal model.tirs model.sealed key.txt
-browsertabicl predict classifier-v2.tirs model.sealed new.csv --key key.txt
+tabicl-anywhere keygen key.txt
+tabicl-anywhere seal model.tirs model.sealed key.txt
+tabicl-anywhere predict classifier-v2.tirs model.sealed new.csv --key key.txt
 ```
 
 With the regression checkpoint the same two commands fit a numeric target and print mean, median and a 5-95% band.
@@ -84,7 +84,7 @@ methods, which return Promises). See `site/README.md`.
 
 ## Measured (i7-11700K, RTX 3090; 10,000 training rows x 100 features, 10 classes, one ensemble member)
 
-| | BrowserTabICL | reference (PyTorch, CPU) |
+| | tabicl-anywhere | reference (PyTorch, CPU) |
 |---|---|---|
 | fit, CPU | 22.7 s, 263 MB peak | 20.5 s (54.6 s on one thread), 6.3 GB peak |
 | cache on disk | 531 MB f32 / 287 MB i16 / 164 MB i8 | (in memory) |
@@ -147,7 +147,7 @@ once); fitting runs all three stages on it (`--gpu`; label-digit tables keep the
 `kern` inner loops (generic over `pulp::Simd`: AVX2, AVX-512, NEON, WebAssembly SIMD) - `store` bundle file and
 storage traits - `crypt` sealing - `warm` in-memory tier - `ckpt` checkpoint reader - `model` weights - `nn`
 blocks - `fit` / `predict` network passes - `gpu` (optional) - `prep` preprocessing and Python-compatible shuffles -
-`csv` - `table` classifier and regressor - `bin/browsertabicl` command line - `wasm/` JavaScript bindings.
+`csv` - `table` classifier and regressor - `bin/tabicl-anywhere` command line - `wasm/` JavaScript bindings.
 
 ## Contributing, security, changes
 
@@ -161,4 +161,4 @@ and what the encryption does and does not protect: [SECURITY.md](SECURITY.md). R
 * The model weights (`docs/weights/*.bin`, a half-precision copy of the published TabICL v2 checkpoints) are
   TabICL's, Copyright (c) 2025, Soda team @ Inria, and are redistributed under their BSD 3-Clause licence, which is
   kept beside them (`docs/weights/LICENSE-TabICL.txt`, also `site/weights/`).
-* BrowserTabICL is an independent implementation. It is not affiliated with or endorsed by the TabICL authors.
+* tabicl-anywhere is an independent implementation. It is not affiliated with or endorsed by the TabICL authors.

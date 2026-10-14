@@ -181,7 +181,7 @@ const CHECKPOINT = { classifier: "tabicl-classifier-v2-20260212.ckpt", regressor
 /**
  * Where the weights for `kind` come from, given the page's one setting `base`:
  *  - a folder (the default, "weights/"): our own half-size copy, cut into parts of at most 14 MB and listed in
- *    `<kind>-v2-half.json` (made by `browsertabicl split`);
+ *    `<kind>-v2-half.json` (made by `tabicl-anywhere split`);
  *  - an address on huggingface.co: the checkpoint as published (110 MB), converted to half size in the browser.
  */
 export function weightsSource(base, kind, pageUrl) {

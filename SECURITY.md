@@ -3,14 +3,14 @@
 ## Reporting a vulnerability
 
 Please report security problems privately, through GitHub's
-[private vulnerability reporting](https://github.com/StevenKauwe/browsertabicl/security/advisories/new)
+[private vulnerability reporting](https://github.com/StevenKauwe/tabicl-anywhere/security/advisories/new)
 ("Report a vulnerability" on the repository's Security tab), not in a public issue. Include what you did, what
 happened, and the version or commit. You should hear back within a week. Fixes are released as soon as they are
 ready and credited to you unless you prefer otherwise.
 
 Only the latest release (and `main`) receives security fixes.
 
-## What BrowserTabICL defends against, and what it does not
+## What tabicl-anywhere defends against, and what it does not
 
 ### Reading untrusted files
 
@@ -25,13 +25,13 @@ Get weights from a source you trust.
 
 ### Sealed (encrypted) models
 
-`browsertabicl seal` and `crypt::Sealed` encrypt a fitted model at rest so that it can still be streamed:
+`tabicl-anywhere seal` and `crypt::Sealed` encrypt a fitted model at rest so that it can still be streamed:
 
 * The model is cut into blocks of 64 KiB, each encrypted and authenticated on its own with XChaCha20-Poly1305
   (a 256-bit key; a 192-bit nonce made of a random 128-bit file id and the block's number).
 * Reading checks every block it touches. A wrong key, a changed byte, or a block moved to another position
   or taken from another sealed file is refused with an error; it never yields silently wrong numbers.
-* The key is 32 random bytes from the operating system (`browsertabicl keygen`). Nothing derived from it is
+* The key is 32 random bytes from the operating system (`tabicl-anywhere keygen`). Nothing derived from it is
   stored in the sealed file. `keygen` writes the key file readable by its owner only (on Unix) and never
   overwrites an existing one.
 
@@ -53,7 +53,7 @@ What it does **not** protect:
 
 ### The web page
 
-The page at https://stevenkauwe.github.io/browsertabicl/ runs entirely in the visitor's browser. Tables and
+The page at https://stevenkauwe.github.io/tabicl-anywhere/ runs entirely in the visitor's browser. Tables and
 fitted models stay on the visitor's machine (browser storage); nothing is uploaded. It fetches only its own files
 and, if configured to, the published weights from Hugging Face.
 

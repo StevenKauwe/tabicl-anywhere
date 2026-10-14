@@ -1,4 +1,4 @@
-//! BrowserTabICL for JavaScript: load weights, fit a table, predict, all on bytes held in memory.
+//! tabicl-anywhere for JavaScript: load weights, fit a table, predict, all on bytes held in memory.
 //!
 //! ```js
 //! const weights = new Weights(new Uint8Array(await (await fetch("classifier-v2.tirs")).arrayBuffer()));
@@ -23,15 +23,15 @@
 //! Tables: `Table` reads CSV text by the same rules as the command line (text columns become categories, empty
 //! cells are missing) and hands back numbers plus a schema to keep with the fitted model.
 
-use browsertabicl::csv::{describe, parse, Schema};
-use browsertabicl::fit::{FitOpts, Kv};
-use browsertabicl::gpu::{Gpu, VramTier};
-use browsertabicl::model::{Load, Model};
-use browsertabicl::predict::{IclWeights, PredictOpts, Stats};
-use browsertabicl::store::{Bundle, MemStore};
-use browsertabicl::table::{finish_proba, fit_classifier_on, fit_classifier_on_async, fit_regressor_on, fit_regressor_on_async, member_count, Classifier, ClassifierOpts, Regressor};
 use std::rc::Rc;
 use std::sync::Arc;
+use tabicl_anywhere::csv::{describe, parse, Schema};
+use tabicl_anywhere::fit::{FitOpts, Kv};
+use tabicl_anywhere::gpu::{Gpu, VramTier};
+use tabicl_anywhere::model::{Load, Model};
+use tabicl_anywhere::predict::{IclWeights, PredictOpts, Stats};
+use tabicl_anywhere::store::{Bundle, MemStore};
+use tabicl_anywhere::table::{finish_proba, fit_classifier_on, fit_classifier_on_async, fit_regressor_on, fit_regressor_on_async, member_count, Classifier, ClassifierOpts, Regressor};
 use wasm_bindgen::prelude::*;
 
 fn err(e: std::io::Error) -> JsError {
@@ -143,14 +143,14 @@ fn json_str(s: &str) -> String {
 /// Turn a checkpoint or weight file into a weight file, optionally half size (16-bit floats).
 #[wasm_bindgen(js_name = toBundle)]
 pub fn to_bundle(bytes: Vec<u8>, half: bool) -> Result<Vec<u8>, JsError> {
-    browsertabicl::ckpt::bundle_bytes(bytes, half).map_err(err)
+    tabicl_anywhere::ckpt::bundle_bytes(bytes, half).map_err(err)
 }
 
 /// How fast this machine runs the inner loop, in multiply-adds per second, measured for about `ms` milliseconds.
 /// Needs no weights, so a page can call it at once and use it to estimate how long a fit will take.
 #[wasm_bindgen]
 pub fn calibrate(ms: f64) -> f64 {
-    browsertabicl::nn::calibrate(ms)
+    tabicl_anywhere::nn::calibrate(ms)
 }
 
 /// Bytes of memory this WebAssembly instance holds right now. It only ever grows (up to 4 GB), so after an
@@ -278,7 +278,7 @@ impl Weights {
     /// From the bytes of a weight bundle, or of a published PyTorch checkpoint.
     #[wasm_bindgen(constructor)]
     pub fn new(bytes: Vec<u8>) -> Result<Weights, JsError> {
-        let bytes = browsertabicl::ckpt::bundle_bytes(bytes, false).map_err(err)?;
+        let bytes = tabicl_anywhere::ckpt::bundle_bytes(bytes, false).map_err(err)?;
         let bundle = Bundle::from_source(Box::new(Arc::new(bytes))).map_err(err)?;
         Ok(Weights { model: Rc::new(Model::load(&bundle, Load::Fit).map_err(err)?) })
     }
@@ -368,7 +368,7 @@ impl Weights {
         let (model, gpu) = (self.model.clone(), card.gpu.clone());
         let mut o = ClassifierOpts { only: Some(vec![member]), ..opts(estimators, &kv)? };
         let before = gpu.stages.load(std::sync::atomic::Ordering::Relaxed);
-        o.fit.accel = browsertabicl::fit::Accel(Some(gpu.clone()));
+        o.fit.accel = tabicl_anywhere::fit::Accel(Some(gpu.clone()));
         Ok(wasm_bindgen_futures::future_to_promise(async move {
             let y: Vec<usize> = y.iter().map(|v| *v as usize).collect();
             let out = MemStore::new();
@@ -391,7 +391,7 @@ impl Weights {
         let (model, gpu) = (self.model.clone(), card.gpu.clone());
         let mut o = ClassifierOpts { only: Some(vec![member]), ..opts(estimators, &kv)? };
         let before = gpu.stages.load(std::sync::atomic::Ordering::Relaxed);
-        o.fit.accel = browsertabicl::fit::Accel(Some(gpu.clone()));
+        o.fit.accel = tabicl_anywhere::fit::Accel(Some(gpu.clone()));
         Ok(wasm_bindgen_futures::future_to_promise(async move {
             let out = MemStore::new();
             let extra: &[(&str, &[u8])] = if schema.is_empty() { &[] } else { &[("table/schema", schema.as_bytes())] };
@@ -421,7 +421,7 @@ impl Weights {
             let members = bundle.i32s("table/meta").map_err(js)?[3] as usize;
             for i in 0..members {
                 let prefix = format!("m{i}/");
-                let nodes = browsertabicl::predict::Cache::open(&bundle, &prefix).map_err(js)?.nodes.len();
+                let nodes = tabicl_anywhere::predict::Cache::open(&bundle, &prefix).map_err(js)?.nodes.len();
                 for node in 0..nodes {
                     tier.preload("page", &key, &bundle, &gw, &prefix, node).map_err(js)?;
                 }

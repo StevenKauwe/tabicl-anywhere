@@ -14,7 +14,7 @@ ignore = [
 ]
 
 [licenses]
-# permissive licences only: everything here is compatible with shipping BrowserTabICL under BSD-3-Clause
+# permissive licences only: everything here is compatible with shipping tabicl-anywhere under BSD-3-Clause
 allow = [
     "MIT",
     "Apache-2.0",

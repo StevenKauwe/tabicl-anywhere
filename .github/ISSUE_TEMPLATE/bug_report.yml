@@ -15,7 +15,7 @@ body:
       label: How to make it happen again
       description: The commands you ran (or the page and the steps), and a small table if you can share one. Please leave out private data.
       placeholder: |
-        browsertabicl fit classifier-v2.tirs train.csv --target grade model.tirs
+        tabicl-anywhere fit classifier-v2.tirs train.csv --target grade model.tirs
     validations:
       required: true
   - type: dropdown

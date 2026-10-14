@@ -109,7 +109,7 @@ impl<R: ReadAt> Sealed<R> {
         let mut head = [0u8; HEAD];
         inner.read_exact_at(&mut head, 0)?;
         if &head[..8] != MAGIC {
-            return Err(bad("not a sealed BrowserTabICL bundle"));
+            return Err(bad("not a sealed tabicl-anywhere bundle"));
         }
         Ok(Sealed { inner, cipher: XChaCha20Poly1305::new(key.into()), id: head[8..24].try_into().unwrap(), len: u64::from_le_bytes(head[24..32].try_into().unwrap()) })
     }

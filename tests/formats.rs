@@ -3,15 +3,15 @@
 //! allocation; good input must round-trip exactly. Property tests (proptest) try many random cases of each.
 
 mod common;
-use browsertabicl::crypt::{read_key, seal_file, Sealed};
-use browsertabicl::csv::{describe, parse, Schema};
-use browsertabicl::model::{Load, Model};
-use browsertabicl::prep::*;
-use browsertabicl::store::*;
 use common::*;
 use proptest::prelude::*;
 use std::io;
 use std::sync::Arc;
+use tabicl_anywhere::crypt::{read_key, seal_file, Sealed};
+use tabicl_anywhere::csv::{describe, parse, Schema};
+use tabicl_anywhere::model::{Load, Model};
+use tabicl_anywhere::prep::*;
+use tabicl_anywhere::store::*;
 
 fn mem_bundle(tensors: &[(&str, &str, Vec<usize>)], fill: impl Fn(&BundleWriter)) -> Vec<u8> {
     let out = MemStore::new();
@@ -94,7 +94,7 @@ fn damaged_bundles_are_errors() {
     assert!(open(b"short".to_vec()).is_err(), "shorter than the header");
     let mut magic = good.clone();
     magic[0] = b'X';
-    assert!(open(magic).unwrap_err().to_string().contains("not a BrowserTabICL bundle"));
+    assert!(open(magic).unwrap_err().to_string().contains("not a tabicl-anywhere bundle"));
     let mut huge = good.clone();
     huge[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
     assert!(open(huge).unwrap_err().to_string().contains("damaged"), "a huge index length is refused before allocating");
@@ -253,7 +253,7 @@ proptest! {
 fn sealed_of(plain: &[u8]) -> (Vec<u8>, [u8; 32]) {
     let (p, s) = (scratch("plain"), scratch("sealed"));
     std::fs::write(&p, plain).unwrap();
-    let key = browsertabicl::crypt::new_key().unwrap();
+    let key = tabicl_anywhere::crypt::new_key().unwrap();
     seal_file(&p, &s, &key).unwrap();
     let out = std::fs::read(&s).unwrap();
     let _ = (std::fs::remove_file(p), std::fs::remove_file(s));
@@ -342,15 +342,15 @@ fn tiny_ckpt() -> Vec<u8> {
 fn checkpoint_conversion() {
     let (ck, out) = (scratch("ck"), scratch("out"));
     std::fs::write(&ck, tiny_ckpt()).unwrap();
-    let n = browsertabicl::ckpt::convert(&ck, &out).unwrap();
+    let n = tabicl_anywhere::ckpt::convert(&ck, &out).unwrap();
     let b = Bundle::open(&out).unwrap();
     assert_eq!(b.entries.len(), n + 1, "every tensor plus the configuration");
-    assert_eq!(std::fs::read(&out).unwrap(), browsertabicl::ckpt::bundle_bytes(tiny_ckpt(), false).unwrap(), "file and memory paths agree");
+    assert_eq!(std::fs::read(&out).unwrap(), tabicl_anywhere::ckpt::bundle_bytes(tiny_ckpt(), false).unwrap(), "file and memory paths agree");
     let cfg = String::from_utf8(b.bytes("config.json").unwrap()).unwrap();
     assert!(cfg.contains("\"embed_dim\": 8") && cfg.contains("\"col_ssmax\": \"qassmax-mlp-elementwise\"") && cfg.contains("\"col_affine\": false"), "{cfg}");
     // a bundle given to bundle_bytes passes through untouched
     let bytes = std::fs::read(&out).unwrap();
-    assert_eq!(browsertabicl::ckpt::bundle_bytes(bytes.clone(), false).unwrap(), bytes);
+    assert_eq!(tabicl_anywhere::ckpt::bundle_bytes(bytes.clone(), false).unwrap(), bytes);
     let _ = (std::fs::remove_file(ck), std::fs::remove_file(out));
 }
 
@@ -362,7 +362,7 @@ fn halving_narrows_only_large_float_tensors() {
         w.write_f32_at("small", 0, &[0.1, 0.2, 0.3, 1e-9]).unwrap();
     }));
     let out = MemStore::new();
-    assert_eq!(browsertabicl::ckpt::halve_on(&src, Box::new(out.clone())).unwrap(), (1, 2));
+    assert_eq!(tabicl_anywhere::ckpt::halve_on(&src, Box::new(out.clone())).unwrap(), (1, 2));
     let half = bytes_bundle(out.bytes());
     assert_eq!(half.entry("big").unwrap().dtype, "float16");
     assert_eq!(half.entry("big").unwrap().dims, [50, 100]);
@@ -377,7 +377,7 @@ fn halving_narrows_only_large_float_tensors() {
 #[test]
 fn damaged_checkpoints_are_errors() {
     let good = tiny_ckpt();
-    let err = |b: Vec<u8>| browsertabicl::ckpt::bundle_bytes(b, false).unwrap_err().to_string();
+    let err = |b: Vec<u8>| tabicl_anywhere::ckpt::bundle_bytes(b, false).unwrap_err().to_string();
     assert!(err(b"not a zip at all".to_vec()).contains("not a zip"));
     assert!(err(Vec::new()).contains("not a zip"));
     assert!(err(good[..good.len() / 2].to_vec()).contains("zip"), "cut in half: no end record");
@@ -395,7 +395,7 @@ fn damaged_checkpoints_are_errors() {
     if let Some(z) = good.windows(4).rposition(|w| w == b"PK\x06\x06") {
         far[z + 48..z + 56].copy_from_slice(&u64::MAX.to_le_bytes()); // PyTorch writes the zip64 form too
     }
-    assert!(browsertabicl::ckpt::bundle_bytes(far, false).is_err());
+    assert!(tabicl_anywhere::ckpt::bundle_bytes(far, false).is_err());
     // a zip without data.pkl
     let mut renamed = good.clone();
     for i in 0..renamed.len() - 8 {
@@ -418,9 +418,9 @@ proptest! {
             let i = at.index(b.len());
             b[i] = v;
         }
-        let _ = browsertabicl::ckpt::bundle_bytes(b.clone(), false);
+        let _ = tabicl_anywhere::ckpt::bundle_bytes(b.clone(), false);
         b.truncate(cut.index(b.len()));
-        let _ = browsertabicl::ckpt::bundle_bytes(b, false);
+        let _ = tabicl_anywhere::ckpt::bundle_bytes(b, false);
     }
 }
 
@@ -527,7 +527,7 @@ fn csv_numeric_target() {
 #[test]
 fn csv_describe() {
     let d = describe(&parse("a,b\n1,x\n2,y\n,x\n3,z\n4,w\n5,v\n")).unwrap();
-    assert_eq!(d[0], browsertabicl::csv::ColumnInfo { name: "a".into(), numeric: true, distinct: 5, missing: 1, examples: vec!["1".into(), "2".into(), "3".into(), "4".into()] });
+    assert_eq!(d[0], tabicl_anywhere::csv::ColumnInfo { name: "a".into(), numeric: true, distinct: 5, missing: 1, examples: vec!["1".into(), "2".into(), "3".into(), "4".into()] });
     assert!(!d[1].numeric && d[1].distinct == 5 && d[1].examples.len() == 4);
     assert!(describe(&[]).is_err());
     assert!(describe(&parse("a,b\n1\n")).is_err());
@@ -683,13 +683,13 @@ fn published_checkpoints_convert_exactly() {
             eprintln!("ref/ckpt or fixtures missing, skipping {kind}");
             continue;
         };
-        let ours = browsertabicl::ckpt::bundle_bytes(bytes, false).unwrap();
+        let ours = tabicl_anywhere::ckpt::bundle_bytes(bytes, false).unwrap();
         let ob = bytes_bundle(ours.clone());
         assert_eq!(ob.entries.len(), want.entries.len());
         for e in &want.entries {
             assert_eq!(ob.bytes(&e.name).unwrap(), want.bytes(&e.name).unwrap(), "{kind}: {}", e.name);
         }
-        let half = browsertabicl::ckpt::bundle_bytes(ours, true).unwrap();
+        let half = tabicl_anywhere::ckpt::bundle_bytes(ours, true).unwrap();
         if let Some(docs) = docs_weights(kind) {
             let db: Vec<u8> = docs.entries.iter().flat_map(|e| docs.bytes(&e.name).unwrap()).collect();
             let hb = bytes_bundle(half);

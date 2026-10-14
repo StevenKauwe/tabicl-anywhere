@@ -317,7 +317,7 @@ pub async fn fit_raw_async(m: &Model, x: &[f32], y: &[f32], rows: usize, feature
     let mut spill = if emb_len * 4 <= opts.mem_budget {
         Spill::Mem(vec![0.0f32; emb_len])
     } else {
-        let p = opts.scratch.clone().unwrap_or_else(std::env::temp_dir).join(format!("BrowserTabICL-emb-{}-{prefix:.8}.tmp", std::process::id()).replace('/', "_"));
+        let p = opts.scratch.clone().unwrap_or_else(std::env::temp_dir).join(format!("tabicl-anywhere-emb-{}-{prefix:.8}.tmp", std::process::id()).replace('/', "_"));
         let f = File::options().read(true).write(true).create(true).truncate(true).open(&p)?;
         f.set_len(4 * emb_len as u64)?;
         Spill::Disk(f, p)
@@ -591,7 +591,7 @@ pub async fn fit_raw_async(m: &Model, x: &[f32], y: &[f32], rows: usize, feature
             None
         } else {
             // integer storage and too big for memory: keep an exact copy of the layer in a scratch file
-            let p = opts.scratch.clone().unwrap_or_else(std::env::temp_dir).join(format!("BrowserTabICL-kv-{}-{}.tmp", std::process::id(), prefix.replace('/', "_")));
+            let p = opts.scratch.clone().unwrap_or_else(std::env::temp_dir).join(format!("tabicl-anywhere-kv-{}-{}.tmp", std::process::id(), prefix.replace('/', "_")));
             let f = File::options().read(true).write(true).create(true).truncate(true).open(&p)?;
             f.set_len(8 * (rows * d) as u64)?;
             Some(Spill::Disk(f, p))

@@ -1,13 +1,13 @@
 [package]
-name = "browsertabicl"
+name = "tabicl-anywhere"
 version = "0.1.0"
 edition = "2021"
-description = "BrowserTabICL: an independent safe-Rust implementation of the TabICL v2 tabular model that fits, caches to disk and predicts by streaming the cache; runs natively and in the browser"
+description = "An independent safe-Rust implementation of the TabICL v2 tabular model that fits, caches to disk and predicts by streaming the cache; runs natively and in the browser"
 license = "BSD-3-Clause"
 authors = ["Steven Kauwe"]
-repository = "https://github.com/StevenKauwe/browsertabicl"
-homepage = "https://stevenkauwe.github.io/browsertabicl/"
-documentation = "https://docs.rs/browsertabicl"
+repository = "https://github.com/StevenKauwe/tabicl-anywhere"
+homepage = "https://stevenkauwe.github.io/tabicl-anywhere/"
+documentation = "https://docs.rs/tabicl-anywhere"
 readme = "README.md"
 keywords = ["tabular", "machine-learning", "tabicl", "wasm", "inference"]
 categories = ["science", "wasm", "algorithms"]
@@ -21,11 +21,11 @@ exclude = ["/docs/", "/site/", "/fixtures/", "/ref/", "/report/", "/pkg/", "/tar
 members = [".", "wasm"]
 
 [lib]
-name = "browsertabicl"
+name = "tabicl_anywhere"
 
 [[bin]]
-name = "browsertabicl"
-path = "src/bin/browsertabicl.rs"
+name = "tabicl-anywhere"
+path = "src/bin/tabicl-anywhere.rs"
 
 [dependencies]
 pulp = { version = "0.22", features = ["x86-v4"] }

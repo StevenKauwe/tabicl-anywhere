@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 #[cfg(not(target_endian = "little"))]
-compile_error!("BrowserTabICL stores little-endian floats and reads them in place; big-endian targets are not supported");
+compile_error!("tabicl-anywhere stores little-endian floats and reads them in place; big-endian targets are not supported");
 
 const MAGIC: &[u8; 8] = b"TIRSBNDL";
 /// Largest index a bundle may have (64 MiB: about a million tensors).
@@ -238,7 +238,7 @@ pub fn parts_manifest(total: usize, parts: &[(String, usize)]) -> String {
 /// Only what `parts_manifest` writes is understood (it is not a general JSON reader).
 pub fn read_parts_manifest(text: &str) -> io::Result<(usize, Vec<(String, usize)>)> {
     if !text.contains("\"browsertabicl-parts-1\"") {
-        return Err(bad("not a BrowserTabICL parts list (browsertabicl-parts-1)".into()));
+        return Err(bad("not a tabicl-anywhere parts list (browsertabicl-parts-1)".into()));
     }
     let number = |s: &str| -> io::Result<usize> {
         let digits: String = s.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
@@ -315,7 +315,7 @@ impl Bundle {
         let mut head = [0u8; 16];
         file.read_exact_at(&mut head, 0)?;
         if &head[..8] != MAGIC {
-            return Err(bad("not a BrowserTabICL bundle".into()));
+            return Err(bad("not a tabicl-anywhere bundle".into()));
         }
         let index_len = u64::from_le_bytes(head[8..].try_into().unwrap());
         // a real index is a line of text per tensor; anything near this size is a damaged or foreign file, and

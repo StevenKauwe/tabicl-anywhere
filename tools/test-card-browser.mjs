@@ -27,7 +27,7 @@ const server = http.createServer((req, res) => {
 });
 await new Promise((r) => server.listen(0, "127.0.0.1", r));
 const base = `http://127.0.0.1:${server.address().port}`;
-const profile = fs.mkdtempSync(path.join(process.env.SCRATCH || os.tmpdir(), "browsertabicl-card-"));
+const profile = fs.mkdtempSync(path.join(process.env.SCRATCH || os.tmpdir(), "tabicl-anywhere-card-"));
 const args = ["--no-first-run", "--enable-unsafe-webgpu", "--enable-features=Vulkan"];
 if (process.argv.includes("--no-webgpu")) args.splice(1, 1, "--disable-webgpu", "--disable-features=WebGPU");
 if (!headless) args.push("--ozone-platform-hint=auto", "--window-position=4000,4000", "--window-size=900,700");

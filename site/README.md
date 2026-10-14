@@ -11,8 +11,8 @@ browser. No server, no framework, no build step for the page itself.
 | `index.html` | 20 KB | `page.html` wrapped as a complete document. Generated: edit `page.html`, then run `tools/build-site.sh` |
 | `app.js` | 69 KB | the page's logic (one module) |
 | `worker.js` | 10 KB | one engine on a background thread; the page starts several, and one more for the graphics card |
-| `pkg/browsertabicl_wasm.js` | 75 KB | glue for the engine (generated) |
-| `pkg/browsertabicl_wasm_bg.wasm` | 2.36 MB (0.55 MB compressed in transit) | the engine, graphics-card code included (generated) |
+| `pkg/tabicl_anywhere_wasm.js` | 75 KB | glue for the engine (generated) |
+| `pkg/tabicl_anywhere_wasm_bg.wasm` | 2.36 MB (0.55 MB compressed in transit) | the engine, graphics-card code included (generated) |
 | `weights/classifier-v2-half.json` + `.00.bin` ... `.03.bin` | 55.3 MB in 4 parts | the classification model, 16-bit, each part at most 14 MB |
 | `weights/regressor-v2-half.json` + `.00.bin` ... `.03.bin` | 57.3 MB in 4 parts | the number-prediction model, likewise |
 | `weights/LICENSE-TabICL.txt` | 2 KB | the licence the weights are redistributed under (also shown in the page footer) |
@@ -32,8 +32,8 @@ Needs `rustup target add wasm32-unknown-unknown` and `wasm-bindgen` (the command
 `Cargo.lock`) on the PATH. The weights step is just:
 
 ```
-browsertabicl convert IN.ckpt-or-.tirs OUT.tirs --half
-browsertabicl split OUT.tirs site/weights/classifier-v2-half      # parts of at most 14 MB, plus the .json list
+tabicl-anywhere convert IN.ckpt-or-.tirs OUT.tirs --half
+tabicl-anywhere split OUT.tirs site/weights/classifier-v2-half      # parts of at most 14 MB, plus the .json list
 ```
 
 ## Where the weights come from: one setting
@@ -67,8 +67,8 @@ Publish `page.html` as the page, and these files alongside it at the same relati
 ```
 app.js
 worker.js
-pkg/browsertabicl_wasm.js
-pkg/browsertabicl_wasm_bg.wasm
+pkg/tabicl_anywhere_wasm.js
+pkg/tabicl_anywhere_wasm_bg.wasm
 weights/classifier-v2-half.json
 weights/classifier-v2-half.00.bin   weights/classifier-v2-half.01.bin
 weights/classifier-v2-half.02.bin   weights/classifier-v2-half.03.bin

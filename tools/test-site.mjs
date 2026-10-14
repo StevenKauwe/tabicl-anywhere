@@ -12,7 +12,7 @@ import * as app from "../site/app.js";
 import * as worker from "../site/worker.js";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
-const wasmPath = path.join(root, "site/pkg/browsertabicl_wasm_bg.wasm");
+const wasmPath = path.join(root, "site/pkg/tabicl_anywhere_wasm_bg.wasm");
 const scratch = process.env.SCRATCH || path.resolve(root, process.env.CARGO_TARGET_DIR || "target");
 fs.mkdirSync(scratch, { recursive: true });
 // Test data: the generated fixtures/ when present; otherwise the small committed copies in tests/data, and the
@@ -129,7 +129,7 @@ check(await ask("describe", { text: "a,b\n1\n" }).then(() => false, (e) => /row 
   const { x } = await ask("features", { schema: entry.schema, text: fresh });
   const res = await app.predictModel(direct, store, { model: entry, weightsBlob: weightBlobs.classifier, x, rows: 25 });
   const pageCsv = app.resultsCsv(entry, res, 25);
-  const bin = path.resolve(root, process.env.CARGO_TARGET_DIR || "target", "release/browsertabicl");
+  const bin = path.resolve(root, process.env.CARGO_TARGET_DIR || "target", "release/tabicl-anywhere");
   if (fs.existsSync(bin)) {
     const dir = fs.mkdtempSync(path.join(scratch, "site-test-"));
     fs.writeFileSync(path.join(dir, "train.csv"), train);

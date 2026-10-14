@@ -13,10 +13,10 @@
 mod common;
 use common::*;
 
-use browsertabicl::fit::{fit_raw, raw_entries, FitOpts};
-use browsertabicl::model::{Load, Model};
-use browsertabicl::predict::{embed, in_context, represent, Cache, IclWeights, PredictOpts, Stats};
-use browsertabicl::store::{Bundle, BundleWriter};
+use tabicl_anywhere::fit::{fit_raw, raw_entries, FitOpts};
+use tabicl_anywhere::model::{Load, Model};
+use tabicl_anywhere::predict::{embed, in_context, represent, Cache, IclWeights, PredictOpts, Stats};
+use tabicl_anywhere::store::{Bundle, BundleWriter};
 
 fn worst(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len());
@@ -47,7 +47,7 @@ fn check(name: &str, wb: &Bundle, fx: &Bundle, reopen: impl Fn() -> Bundle, tol:
     let out = scratch(name);
     let opts = FitOpts { chunk: 48, ..Default::default() };
     let yf: Vec<f32> = y.iter().map(|v| *v as f32).collect();
-    let plan = browsertabicl::fit::Plan::new(&m, &yf, classes);
+    let plan = tabicl_anywhere::fit::Plan::new(&m, &yf, classes);
     let ents = raw_entries(&m, "", n, h, &opts, &plan);
     let ents: Vec<(&str, &str, Vec<usize>)> = ents.iter().map(|(a, b, c)| (a.as_str(), b.as_str(), c.clone())).collect();
     let w = BundleWriter::create(&out, &ents).unwrap();
@@ -150,12 +150,12 @@ const TINY: f32 = 5e-5;
 /// The whole classifier (preprocessing, ensemble, averaging) against the reference's `TabICLClassifier`.
 /// Preprocessing is always compared at 1e-6 (it does not depend on the weights); probabilities at `tol`.
 fn check_table(name: &str, wb: &Bundle, fx: &Bundle, tol: f64) {
-    use browsertabicl::prep::{ensemble, Prep};
-    use browsertabicl::table::{fit_classifier, Classifier, ClassifierOpts};
+    use tabicl_anywhere::prep::{ensemble, Prep};
+    use tabicl_anywhere::table::{fit_classifier, Classifier, ClassifierOpts};
     let f64s = |n: &str| -> Vec<f64> { f64s(fx, n) };
     let (x, y) = (f64s("x_train"), fx.i32s("y_train").unwrap());
     let (n, h) = (y.len(), x.len() / y.len());
-    let (y, labels) = browsertabicl::table::encode_labels(&y.iter().map(|v| *v as i64).collect::<Vec<_>>());
+    let (y, labels) = tabicl_anywhere::table::encode_labels(&y.iter().map(|v| *v as i64).collect::<Vec<_>>());
     let classes = labels.len();
     // preprocessing, variant by variant
     let (prep, tables) = Prep::fit(&x, n, h, &[false, true], 4.0);
@@ -264,7 +264,7 @@ fn docs_half_many_classes() {
 /// The regression model end to end against the reference's `TabICLRegressor`. `tol` is a fraction of the
 /// targets' spread (their deviation about 50, the value the generator centres them on).
 fn check_regression(name: &str, wb: &Bundle, fx: &Bundle, members: usize, tol: f64) {
-    use browsertabicl::table::{fit_regressor, ClassifierOpts, Regressor};
+    use tabicl_anywhere::table::{fit_regressor, ClassifierOpts, Regressor};
     let f64s = |n: &str| -> Vec<f64> { f64s(fx, n) };
     let (x, y, xt, alphas) = (f64s("x_train"), f64s("y_train"), f64s("x_test"), f64s("alphas"));
     let (n, h) = (y.len(), x.len() / y.len());

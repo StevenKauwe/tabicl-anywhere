@@ -31,7 +31,7 @@ const server = http.createServer((req, res) => {
 });
 await new Promise((r) => server.listen(0, "127.0.0.1", r));
 const base = `http://127.0.0.1:${server.address().port}`;
-const profile = fs.mkdtempSync(path.join(process.env.SCRATCH || os.tmpdir(), "browsertabicl-profile-"));
+const profile = fs.mkdtempSync(path.join(process.env.SCRATCH || os.tmpdir(), "tabicl-anywhere-profile-"));
 const browser = await puppeteer.launch({ executablePath: arg("--browser", "/usr/bin/chromium"), headless: true, userDataDir: profile, args: ["--no-first-run", "--enable-unsafe-webgpu"] });
 let failures = 0;
 const check = (ok, what) => { console.log(`${ok ? "ok  " : "FAIL"} ${what}`); if (!ok) failures++; };

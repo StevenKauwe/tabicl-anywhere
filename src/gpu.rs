@@ -936,7 +936,7 @@ impl Gpu {
         let max_binding = (limits.max_storage_buffer_binding_size as usize).min(limits.max_buffer_size as usize);
         let align = limits.min_storage_buffer_offset_alignment as usize;
         let (device, queue) =
-            adapter.request_device(&wgpu::DeviceDescriptor { label: Some("browsertabicl"), required_limits: limits, ..Default::default() }).await.map_err(|e| fail("could not be opened", e))?;
+            adapter.request_device(&wgpu::DeviceDescriptor { label: Some("tabicl-anywhere"), required_limits: limits, ..Default::default() }).await.map_err(|e| fail("could not be opened", e))?;
         // What the card objects to (out of memory, most of all) is kept for the call in progress to report as
         // an error, instead of stopping the program.
         let trouble: Arc<Mutex<Option<String>>> = Arc::default();

@@ -79,31 +79,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "browsertabicl"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "chacha20poly1305",
- "getrandom 0.2.17",
- "libm",
- "proptest",
- "pulp",
- "rayon",
- "web-time",
- "wgpu",
-]
-
-[[package]]
-name = "browsertabicl-wasm"
-version = "0.1.0"
-dependencies = [
- "browsertabicl",
- "js-sys",
- "wasm-bindgen",
- "wasm-bindgen-futures",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1105,6 +1080,31 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "tabicl-anywhere"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "chacha20poly1305",
+ "getrandom 0.2.17",
+ "libm",
+ "proptest",
+ "pulp",
+ "rayon",
+ "web-time",
+ "wgpu",
+]
+
+[[package]]
+name = "tabicl-anywhere-wasm"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "tabicl-anywhere",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

@@ -5,17 +5,17 @@
 //! card's own arithmetic is checked against the CPU in tests/card.rs.
 
 mod common;
-use browsertabicl::fit::{Accel, Attend};
-use browsertabicl::model::Model;
-use browsertabicl::nn::{row_forward, Rope, RowWs};
-use browsertabicl::predict::{layer_rows, AttendCached, Cache, CardAttend, IclWeights, PredictOpts, Stats};
-use browsertabicl::store::{Bundle, MemStore};
-use browsertabicl::table::{fit_classifier_on, Classifier, ClassifierOpts};
-use browsertabicl::wait::{ready, Later};
 use common::*;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
+use tabicl_anywhere::fit::{Accel, Attend};
+use tabicl_anywhere::model::Model;
+use tabicl_anywhere::nn::{row_forward, Rope, RowWs};
+use tabicl_anywhere::predict::{layer_rows, AttendCached, Cache, CardAttend, IclWeights, PredictOpts, Stats};
+use tabicl_anywhere::store::{Bundle, MemStore};
+use tabicl_anywhere::table::{fit_classifier_on, Classifier, ClassifierOpts};
+use tabicl_anywhere::wait::{ready, Later};
 
 /// Softmax attention of each query row against keys and values given row by row (`[n][d]`), per head.
 fn attention(q: &[f32], k: &[f32], v: &[f32], d: usize, heads: usize) -> Vec<f32> {
@@ -150,14 +150,14 @@ fn fitting_through_the_hooks_matches_the_cpu() {
     oa.fit.accel = Accel(Some(stand.clone()));
     oa.fit.mem_budget = 1;
     oa.fit.scratch = Some(std::env::temp_dir());
-    assert_eq!(fit(&m, &t, &oa), fit(&m, &t, &ClassifierOpts { fit: browsertabicl::fit::FitOpts { mem_budget: 1, ..Default::default() }, ..o.clone() }));
+    assert_eq!(fit(&m, &t, &oa), fit(&m, &t, &ClassifierOpts { fit: tabicl_anywhere::fit::FitOpts { mem_budget: 1, ..Default::default() }, ..o.clone() }));
     assert_eq!(stand.attended.load(Relaxed), 0);
 }
 
 #[test]
 fn prediction_through_the_hooks_matches_the_cpu() {
     let (m, t) = setup();
-    for kv in [browsertabicl::fit::Kv::F32, browsertabicl::fit::Kv::I8] {
+    for kv in [tabicl_anywhere::fit::Kv::F32, tabicl_anywhere::fit::Kv::I8] {
         let mut o = ClassifierOpts { n_estimators: 2, ..Default::default() };
         o.fit.kv = kv;
         let bytes = fit(&m, &t, &o);

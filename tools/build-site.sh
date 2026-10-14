@@ -12,14 +12,14 @@ set -e
 cd "$(dirname "$0")/.."
 T="${CARGO_TARGET_DIR:-target}"
 sh tools/build-wasm.sh
-cargo build --release --bin browsertabicl
+cargo build --release --bin tabicl-anywhere
 mkdir -p site/weights
 for pair in "classifier:${1:-fixtures/classifier-v2.tirs}" "regressor:${2:-fixtures/regressor-v2.tirs}"; do
   kind="${pair%%:*}"; src="${pair#*:}"
   if [ -f "$src" ]; then
     rm -f site/weights/$kind-v2-half.*
-    "$T/release/browsertabicl" convert "$src" "$T/$kind-v2-half.tirs" --half
-    "$T/release/browsertabicl" split "$T/$kind-v2-half.tirs" "site/weights/$kind-v2-half"
+    "$T/release/tabicl-anywhere" convert "$src" "$T/$kind-v2-half.tirs" --half
+    "$T/release/tabicl-anywhere" split "$T/$kind-v2-half.tirs" "site/weights/$kind-v2-half"
   else
     echo "no $src: leaving site/weights/$kind-v2-half.* as it is"
   fi

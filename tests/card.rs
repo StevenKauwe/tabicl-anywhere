@@ -6,15 +6,15 @@
 //! on `table-a`, which is not committed, then skip).
 #![cfg(feature = "gpu")]
 
-use browsertabicl::fit::{Accel, FitOpts, Kv};
-use browsertabicl::gpu::{Gpu, GpuWeights, VramTier};
-use browsertabicl::model::{Load, Model};
-use browsertabicl::predict::{CardAttend, IclWeights, PredictOpts, Stats};
-use browsertabicl::store::Bundle;
-use browsertabicl::table::{fit_classifier, fit_regressor, Classifier, ClassifierOpts, Regressor};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, OnceLock};
+use tabicl_anywhere::fit::{Accel, FitOpts, Kv};
+use tabicl_anywhere::gpu::{Gpu, GpuWeights, VramTier};
+use tabicl_anywhere::model::{Load, Model};
+use tabicl_anywhere::predict::{CardAttend, IclWeights, PredictOpts, Stats};
+use tabicl_anywhere::store::Bundle;
+use tabicl_anywhere::table::{fit_classifier, fit_regressor, Classifier, ClassifierOpts, Regressor};
 
 const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures");
 
@@ -59,7 +59,7 @@ fn table(name: &str, test_rows: usize) -> Option<Table> {
     let x = f64s("x_train");
     let (y_classes, y_numbers) = if fx.entry("y_train").unwrap().dtype.contains("int") {
         let y = fx.i32s("y_train").unwrap();
-        (browsertabicl::table::encode_labels(&y.iter().map(|v| *v as i64).collect::<Vec<_>>()).0, Vec::new())
+        (tabicl_anywhere::table::encode_labels(&y.iter().map(|v| *v as i64).collect::<Vec<_>>()).0, Vec::new())
     } else {
         (Vec::new(), f64s("y_train"))
     };
@@ -77,12 +77,12 @@ fn weights(file: &str) -> Option<Model> {
     }
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/weights");
     let manifest = std::fs::read_to_string(dir.join(file.replace(".tirs", "-half.json"))).ok()?;
-    let bytes = browsertabicl::store::join_parts(&manifest, |name| std::fs::read(dir.join(name))).ok()?;
+    let bytes = tabicl_anywhere::store::join_parts(&manifest, |name| std::fs::read(dir.join(name))).ok()?;
     Model::load(&Bundle::from_source(Box::new(Arc::new(bytes))).ok()?, Load::Fit).ok()
 }
 
 fn scratch(what: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("BrowserTabICL-card-{what}-{}.tirs", std::process::id()))
+    std::env::temp_dir().join(format!("tabicl-anywhere-card-{what}-{}.tirs", std::process::id()))
 }
 
 fn worst(a: &[f64], b: &[f64]) -> f64 {
@@ -96,7 +96,7 @@ fn preload_all(tier: &VramTier, tenant: &str, model: &str, bundle: &Bundle, gw: 
     let mut all = true;
     for i in 0..members {
         let prefix = format!("m{i}/");
-        let nodes = browsertabicl::predict::Cache::open(bundle, &prefix).unwrap().nodes.len();
+        let nodes = tabicl_anywhere::predict::Cache::open(bundle, &prefix).unwrap().nodes.len();
         for node in 0..nodes {
             all &= tier.preload(tenant, model, bundle, gw, &prefix, node).unwrap();
         }
@@ -269,7 +269,7 @@ fn working_memory_is_bounded_and_released() {
     assert!(worst(&cpu, &got) < 1e-3 && tier.fallbacks.load(Relaxed) > 0);
     gpu.release();
     assert_eq!(gpu.working().0, 0, "release leaves no working memory behind");
-    gpu.set_work_budget(browsertabicl::gpu::WORK_BUDGET);
+    gpu.set_work_budget(tabicl_anywhere::gpu::WORK_BUDGET);
     let _ = std::fs::remove_file(path);
 }
 
@@ -279,7 +279,7 @@ fn tenants_at_once_and_eviction_in_flight() {
     let Some((m, bundle, t, cpu, path)) = fitted("table-a", 120) else { return eprintln!("fixtures missing, skipping") };
     let _one = exclusive();
     let gw = Arc::new(GpuWeights::new(&gpu, &m));
-    let one = Gpu::model_bytes(&gw, &browsertabicl::predict::Cache::open(&bundle, "m0/").unwrap(), 0);
+    let one = Gpu::model_bytes(&gw, &tabicl_anywhere::predict::Cache::open(&bundle, "m0/").unwrap(), 0);
     // room for two tenants' copies, each tenant allowed one
     let tier = VramTier::new(gpu.clone(), 2 * one, one);
     assert!(tier.preload("alice", "a", &bundle, &gw, "m0/", 0).unwrap());
@@ -350,7 +350,7 @@ fn model_larger_than_tenant_budget_stays_on_cpu() {
 /// chunk layout with a last chunk that is not full; and the card's speed measurement.
 #[test]
 fn per_layer_attention_matches_plain_attention() {
-    use browsertabicl::fit::Attend;
+    use tabicl_anywhere::fit::Attend;
     let Some(gpu) = card() else { return };
     let _one = exclusive();
     let (rows, chunk, d, heads) = (300usize, 128usize, 512usize, 8usize);
@@ -368,7 +368,7 @@ fn per_layer_attention_matches_plain_attention() {
             }
         }
     }
-    let got = browsertabicl::wait::block_on(gpu.attend(&q, &kv, rows, chunk, d, heads)).unwrap();
+    let got = tabicl_anywhere::wait::block_on(gpu.attend(&q, &kv, rows, chunk, d, heads)).unwrap();
     let mut bad = 0.0f32;
     for r in (0..rows).step_by(37) {
         for h in 0..heads {
@@ -384,7 +384,7 @@ fn per_layer_attention_matches_plain_attention() {
     }
     println!("per-layer attention on the card against plain attention: worst difference {bad:.2e}");
     assert!(bad < 1e-5, "{bad:.2e}");
-    let rate = browsertabicl::wait::block_on(gpu.calibrate(20.0)).unwrap();
+    let rate = tabicl_anywhere::wait::block_on(gpu.calibrate(20.0)).unwrap();
     println!("card attention speed: {:.1} billion multiply-adds a second", rate / 1e9);
     assert!(rate > 1e8, "{rate}");
 }

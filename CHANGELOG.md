@@ -27,12 +27,12 @@ First release.
 - Optional graphics-card fitting and prediction (`--features gpu`: Vulkan, Metal, DirectX 12 and WebGPU through
   wgpu, portable WGSL shaders).
 - A reader for published PyTorch checkpoints that needs no Python.
-- The command-line program `browsertabicl` (`convert`, `fit`, `predict`, `keygen`, `seal`, `split`, `join`, and
+- The command-line program `tabicl-anywhere` (`convert`, `fit`, `predict`, `keygen`, `seal`, `split`, `join`, and
   benchmarks), reading CSV files with text columns and missing cells.
 - WebAssembly bindings and a static web page that fits and predicts entirely in the visitor's browser, served
   from `docs/` by GitHub Pages, with the 16-bit weights split into parts of at most 14 MB.
 - Tests against the reference's numbers that run without the large generated fixtures (a tiny committed model
   and small tables), property tests of the file formats and preprocessing, and CI on Linux, macOS and Windows.
 
-[Unreleased]: https://github.com/StevenKauwe/browsertabicl/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/StevenKauwe/browsertabicl/releases/tag/v0.1.0
+[Unreleased]: https://github.com/StevenKauwe/tabicl-anywhere/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/StevenKauwe/tabicl-anywhere/releases/tag/v0.1.0

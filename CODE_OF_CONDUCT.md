@@ -60,7 +60,7 @@ representative at an online or offline event.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the community leaders responsible for enforcement through the
-project's issue tracker at https://github.com/StevenKauwe/browsertabicl/issues.
+project's issue tracker at https://github.com/StevenKauwe/tabicl-anywhere/issues.
 For a report that should not be public, open an issue asking for a private
 contact and do not include the details there, or use GitHub's private
 vulnerability reporting on the repository's Security tab.

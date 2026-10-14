@@ -9,10 +9,10 @@
 //!   tables. Tests that need it skip with a note when it is absent.
 #![allow(dead_code)]
 
-use browsertabicl::model::{Load, Model};
-use browsertabicl::store::Bundle;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tabicl_anywhere::model::{Load, Model};
+use tabicl_anywhere::store::Bundle;
 
 pub fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -35,14 +35,14 @@ pub fn bytes_bundle(bytes: Vec<u8>) -> Bundle {
 /// The tiny model's weight bundle (`clf` or `reg`), converted from its PyTorch checkpoint by our own reader.
 pub fn tiny_weights(kind: &str) -> Bundle {
     let ckpt = std::fs::read(root().join(format!("tests/data/tiny-{kind}.ckpt"))).unwrap();
-    bytes_bundle(browsertabicl::ckpt::bundle_bytes(ckpt, false).unwrap())
+    bytes_bundle(tabicl_anywhere::ckpt::bundle_bytes(ckpt, false).unwrap())
 }
 
 /// The real 16-bit weights from `docs/weights/` (`classifier` or `regressor`), joined from their parts.
 pub fn docs_weights(kind: &str) -> Option<Bundle> {
     let dir = root().join("docs/weights");
     let manifest = std::fs::read_to_string(dir.join(format!("{kind}-v2-half.json"))).ok()?;
-    let bytes = browsertabicl::store::join_parts(&manifest, |name| std::fs::read(dir.join(name))).unwrap();
+    let bytes = tabicl_anywhere::store::join_parts(&manifest, |name| std::fs::read(dir.join(name))).unwrap();
     Some(bytes_bundle(bytes))
 }
 
@@ -68,7 +68,7 @@ pub fn worst32(a: &[f32], b: &[f32]) -> f32 {
 pub fn scratch(what: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
-    std::env::temp_dir().join(format!("BrowserTabICL-test-{what}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)))
+    std::env::temp_dir().join(format!("tabicl-anywhere-test-{what}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)))
 }
 
 /// A table fixture's training rows, class indices (or numbers) and test rows.
@@ -87,7 +87,7 @@ pub fn table(fx: &Bundle) -> Table {
     let x = f64s(fx, "x_train");
     let (y, yf) = if fx.entry("y_train").unwrap().dtype == "int32" {
         let y = fx.i32s("y_train").unwrap();
-        (browsertabicl::table::encode_labels(&y.iter().map(|v| *v as i64).collect::<Vec<_>>()).0, Vec::new())
+        (tabicl_anywhere::table::encode_labels(&y.iter().map(|v| *v as i64).collect::<Vec<_>>()).0, Vec::new())
     } else {
         (Vec::new(), f64s(fx, "y_train"))
     };

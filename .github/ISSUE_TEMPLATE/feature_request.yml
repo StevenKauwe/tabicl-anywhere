@@ -1,5 +1,5 @@
 name: Feature request
-description: Something BrowserTabICL should do that it does not
+description: Something tabicl-anywhere should do that it does not
 labels: [enhancement]
 body:
   - type: textarea

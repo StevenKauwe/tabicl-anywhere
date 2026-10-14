@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_browsertabicl")).args(args).output().unwrap()
+    Command::new(env!("CARGO_BIN_EXE_tabicl-anywhere")).args(args).output().unwrap()
 }
 
 fn ok(args: &[&str]) -> String {
@@ -41,7 +41,7 @@ impl Drop for Dir {
 }
 
 /// Write a fixture table as CSV: features, a text column, and the target last. Returns the target labels.
-fn write_csv(fx: &browsertabicl::store::Bundle, path: &Path, test_path: &Path, numeric: bool) -> Vec<String> {
+fn write_csv(fx: &tabicl_anywhere::store::Bundle, path: &Path, test_path: &Path, numeric: bool) -> Vec<String> {
     let t = table(fx);
     let label = |i: usize| if numeric { format!("{}", t.yf[i]) } else { ["no", "yes", "maybe"][t.y[i] % 3].to_string() };
     let cell = |v: f64| if v.is_nan() { String::new() } else { format!("{v}") };
@@ -67,7 +67,7 @@ fn convert_fit_predict_seal() {
     let ck = root().join("tests/data/tiny-clf.ckpt");
     ok(&["convert", ck.to_str().unwrap(), &d.p("w.tirs")]);
     ok(&["convert", &d.p("w.tirs"), &d.p("w-half.tirs"), "--half"]);
-    assert!(browsertabicl::store::Bundle::open(d.p("w-half.tirs")).is_ok());
+    assert!(tabicl_anywhere::store::Bundle::open(d.p("w-half.tirs")).is_ok());
     let fx = data("tiny-table");
     let labels = write_csv(&fx, d.0.join("train.csv").as_path(), d.0.join("new.csv").as_path(), false);
     ok(&["fit", &d.p("w.tirs"), &d.p("train.csv"), "--target", "y", &d.p("m.tirs"), "--estimators", "2", "--kv", "i16", "--chunk", "50"]);

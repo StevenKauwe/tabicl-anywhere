@@ -1,7 +1,7 @@
-# Contributing to BrowserTabICL
+# Contributing to tabicl-anywhere
 
 Thank you for helping. Bug reports, questions and pull requests are all welcome on the
-[issue tracker](https://github.com/StevenKauwe/browsertabicl/issues). By taking part you agree to follow the
+[issue tracker](https://github.com/StevenKauwe/tabicl-anywhere/issues). By taking part you agree to follow the
 [code of conduct](CODE_OF_CONDUCT.md).
 
 ## What this project is
@@ -87,7 +87,7 @@ $PY tools/dump_reg.py   tests/data/tiny-reg.ckpt tests/data/tiny-reg-b.tirs 80 1
 ### Why the reference is not in the repository
 
 `ref/` holds a copy of the reference's source, its Python environments (several GB with PyTorch) and the
-published checkpoints (110 MB each). None of it is needed to build or use BrowserTabICL, it is third-party code
+published checkpoints (110 MB each). None of it is needed to build or use tabicl-anywhere, it is third-party code
 under its own licence, and the checkpoints are better fetched from their source. It is listed in `.gitignore`.
 The weights the web page needs are committed in `docs/weights/` at 16-bit precision, with their licence.
 
@@ -95,7 +95,7 @@ The weights the web page needs are committed in `docs/weights/` at 16-bit precis
 
 ```
 cargo install cargo-llvm-cov
-cargo llvm-cov --release --workspace --exclude browsertabicl-wasm --features gpu --html
+cargo llvm-cov --release --workspace --exclude tabicl-anywhere-wasm --features gpu --html
 ```
 
 CI publishes a CPU-only report on every run (its machines have no graphics card).

@@ -79,7 +79,7 @@ jobs:
       - name: Build the engine for the browser and for Node
         run: tools/build-wasm.sh
       - name: The committed page runs the same engine that was just built
-        run: cmp site/pkg/browsertabicl_wasm_bg.wasm docs/pkg/browsertabicl_wasm_bg.wasm || echo "::warning::docs/pkg is not the engine built from this commit; run tools/deploy-docs.sh"
+        run: cmp site/pkg/tabicl_anywhere_wasm_bg.wasm docs/pkg/tabicl_anywhere_wasm_bg.wasm || echo "::warning::docs/pkg is not the engine built from this commit; run tools/deploy-docs.sh"
       - name: Engine against the reference, under Node
         run: node tools/test-wasm.cjs
       - name: The page's own logic, under Node
@@ -114,7 +114,7 @@ jobs:
           tool: cargo-llvm-cov
       - name: Measure (no graphics card here: card code is counted as not run)
         run: |
-          cargo llvm-cov --release --workspace --exclude browsertabicl-wasm --lcov --output-path lcov.info
+          cargo llvm-cov --release --workspace --exclude tabicl-anywhere-wasm --lcov --output-path lcov.info
           cargo llvm-cov report --release --html --output-dir coverage
       - name: Summary
         run: |
