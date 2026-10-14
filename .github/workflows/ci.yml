@@ -112,7 +112,7 @@ jobs:
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-llvm-cov
-      - name: Measure (no graphics card here: card code is counted as not run)
+      - name: "Measure (no graphics card here: card code is counted as not run)"
         run: |
           cargo llvm-cov --release --workspace --exclude tabicl-anywhere-wasm --lcov --output-path lcov.info
           cargo llvm-cov report --release --html --output-dir coverage
