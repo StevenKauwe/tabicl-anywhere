@@ -15,7 +15,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 /// A boxed future, for the accelerator traits (a trait object's methods cannot be `async fn`).
 pub type Later<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
@@ -25,19 +25,12 @@ pub fn ready<'a, T: 'a>(v: T) -> Later<'a, T> {
     Box::pin(std::future::ready(v))
 }
 
-struct Idle;
-
-impl Wake for Idle {
-    fn wake(self: Arc<Self>) {}
-}
-
 /// Run `f` to its end on this thread.
 ///
 /// In a browser this panics if `f` really has to wait: there, call the `_async` form from JavaScript instead.
 pub fn block_on<F: Future>(f: F) -> F::Output {
     let mut f = std::pin::pin!(f);
-    let waker = Waker::from(Arc::new(Idle));
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(Waker::noop());
     loop {
         if let Poll::Ready(v) = f.as_mut().poll(&mut cx) {
             return v;
@@ -100,5 +93,31 @@ impl<T> Future for Once<T> {
         }
         s.waker = Some(cx.waker().clone());
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ready_values_and_one_shot_channels() {
+        assert_eq!(block_on(ready(5)), 5);
+        // a value sent from another thread while block_on waits for it
+        let (tx, rx) = once::<u32>();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            tx.send(7);
+        });
+        assert_eq!(block_on(rx), Some(7));
+        t.join().unwrap();
+        // the sender dropped without sending: None, not a hang
+        let (tx, rx) = once::<u32>();
+        drop(tx);
+        assert_eq!(block_on(rx), None);
+        // sent before anyone waits
+        let (tx, rx) = once::<&str>();
+        tx.send("early");
+        assert_eq!(block_on(rx), Some("early"));
     }
 }

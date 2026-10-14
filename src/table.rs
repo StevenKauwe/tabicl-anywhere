@@ -8,9 +8,9 @@
 use crate::fit::{fit_raw_async, raw_entries, FitOpts, Plan};
 use crate::model::Model;
 use crate::predict::{predict_raw_async, Cache, IclWeights, PredictOpts, Stats};
-use crate::wait::block_on;
 use crate::prep::{ensemble, ColNorm, Member, Prep, COL_NORM_FIELDS};
 use crate::store::{Bundle, BundleWriter, Storage};
+use crate::wait::block_on;
 use std::fs::File;
 use std::io;
 use std::path::Path;
@@ -124,8 +124,8 @@ pub async fn fit_classifier_on_async(m: &Model, x: &[f64], y: &[usize], n: usize
     }
     let member_y = |mb: &Member| -> Vec<f32> { y.iter().map(|c| mb.classes[*c] as f32).collect() };
     let plans: Vec<Plan> = members.iter().map(|mb| Plan::new(m, &member_y(mb), classes)).collect();
-    for i in 0..members.len() {
-        ents.extend(raw_entries(m, &format!("m{i}/"), n, k, &opts.fit, &plans[i]));
+    for (i, plan) in plans.iter().enumerate() {
+        ents.extend(raw_entries(m, &format!("m{i}/"), n, k, &opts.fit, plan));
     }
     let refs: Vec<(&str, &str, Vec<usize>)> = ents.iter().map(|(a, b, c)| (a.as_str(), b.as_str(), c.clone())).collect();
     let w = BundleWriter::create_on(store, &refs)?;
@@ -157,6 +157,42 @@ pub async fn fit_classifier_on_async(m: &Model, x: &[f64], y: &[usize], n: usize
     w.file.sync()
 }
 
+/// The preprocessing state and member rows stored by a fit, read back and checked for consistency, so a damaged
+/// bundle (or a regression bundle opened as a classifier, or the other way round) is an error and not a panic.
+/// `extra` is how many numbers follow each member's feature order (`classes` for a classifier, 1 for regression).
+fn open_table(bundle: &Bundle, extra: impl Fn(usize) -> usize) -> io::Result<(Prep, Vec<Vec<i32>>, usize)> {
+    let damaged = |what: &str| io::Error::new(io::ErrorKind::InvalidData, format!("fitted bundle is damaged or of the other kind: {what}"));
+    let f64s = |name: &str| -> io::Result<Vec<f64>> { Ok(bytemuck::pod_collect_to_vec(&bundle.bytes(name)?)) };
+    let meta = bundle.i32s("table/meta")?;
+    if meta.len() != 5 || meta.iter().any(|v| *v < 0) {
+        return Err(damaged("table/meta"));
+    }
+    let (h, k, classes, nm, nv) = (meta[0] as usize, meta[1] as usize, meta[2] as usize, meta[3] as usize, meta[4] as usize);
+    let norms = f64s("table/norms")?;
+    let impute = f64s("table/impute")?;
+    let keep: Vec<usize> = bundle.i32s("table/keep")?.iter().map(|v| *v as usize).collect();
+    let power: Vec<bool> = bundle.i32s("table/power")?.iter().map(|v| *v != 0).collect();
+    if impute.len() != h || keep.len() != k || keep.iter().any(|j| *j >= h) || power.len() != nv || norms.len() != nv * k * COL_NORM_FIELDS {
+        return Err(damaged("preprocessing"));
+    }
+    let prep = Prep { n_in: h, impute, keep, power, norms: (0..nv).map(|v| (0..k).map(|j| ColNorm::from_array(&norms[(v * k + j) * COL_NORM_FIELDS..])).collect()).collect() };
+    let width = 1 + k + extra(classes);
+    let rows = bundle.i32s("table/members")?;
+    if nm == 0 || rows.len() != nm * width {
+        return Err(damaged("members"));
+    }
+    let members: Vec<Vec<i32>> = rows.chunks_exact(width).map(|r| r.to_vec()).collect();
+    for r in &members {
+        let ok_norm = (r[0] as usize) < nv;
+        let ok_feats = r[1..1 + k].iter().all(|v| *v >= 0 && (*v as usize) < k);
+        let ok_classes = r[1 + k..].iter().all(|v| *v >= 0 && (*v as usize) < classes.max(1));
+        if r[0] < 0 || !ok_norm || !ok_feats || !ok_classes {
+            return Err(damaged("a member's settings"));
+        }
+    }
+    Ok((prep, members, classes))
+}
+
 /// A fitted classifier, opened from its bundle. Holds only the small preprocessing state; caches stay in the bundle.
 pub struct Classifier<'b> {
     pub bundle: &'b Bundle,
@@ -168,24 +204,19 @@ pub struct Classifier<'b> {
 
 impl<'b> Classifier<'b> {
     pub fn open(bundle: &'b Bundle) -> io::Result<Classifier<'b>> {
-        let f64s = |name: &str| -> io::Result<Vec<f64>> { Ok(bytemuck::pod_collect_to_vec(&bundle.bytes(name)?)) };
-        let meta = bundle.i32s("table/meta")?;
-        let (h, k, classes, nm, nv) = (meta[0] as usize, meta[1] as usize, meta[2] as usize, meta[3] as usize, meta[4] as usize);
-        let norms = f64s("table/norms")?;
-        let prep = Prep {
-            n_in: h,
-            impute: f64s("table/impute")?,
-            keep: bundle.i32s("table/keep")?.iter().map(|v| *v as usize).collect(),
-            power: bundle.i32s("table/power")?.iter().map(|v| *v != 0).collect(),
-            norms: (0..nv).map(|v| (0..k).map(|j| ColNorm::from_array(&norms[(v * k + j) * COL_NORM_FIELDS..])).collect()).collect(),
-        };
-        let rows = bundle.i32s("table/members")?;
-        let members = rows
-            .chunks_exact(1 + k + classes)
-            .map(|r| Member { norm: r[0] as usize, features: r[1..1 + k].iter().map(|v| *v as usize).collect(), classes: r[1 + k..].iter().map(|v| *v as usize).collect() })
-            .collect::<Vec<_>>();
-        assert_eq!(members.len(), nm);
-        Ok(Classifier { bundle, prep, members, classes, temperature: f64s("table/temperature")?[0] })
+        if bundle.has("table/target") {
+            return Err(bad("this bundle is a fitted regression model, not a classifier".into()));
+        }
+        let (prep, rows, classes) = open_table(bundle, |c| c)?;
+        if classes == 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "fitted classifier has no classes"));
+        }
+        let k = prep.keep.len();
+        let members =
+            rows.iter().map(|r| Member { norm: r[0] as usize, features: r[1..1 + k].iter().map(|v| *v as usize).collect(), classes: r[1 + k..].iter().map(|v| *v as usize).collect() }).collect();
+        let temperature: Vec<f64> = bytemuck::pod_collect_to_vec(&bundle.bytes("table/temperature")?);
+        let temperature = *temperature.first().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "fitted classifier has no temperature"))?;
+        Ok(Classifier { bundle, prep, members, classes, temperature })
     }
 
     /// Class probabilities `[n][classes]` for raw rows `x` (`[n][features as given to fit]`, NaN for missing).
@@ -404,19 +435,16 @@ pub struct Regressor<'b> {
 
 impl<'b> Regressor<'b> {
     pub fn open(bundle: &'b Bundle) -> io::Result<Regressor<'b>> {
-        let f64s = |name: &str| -> io::Result<Vec<f64>> { Ok(bytemuck::pod_collect_to_vec(&bundle.bytes(name)?)) };
-        let meta = bundle.i32s("table/meta")?;
-        let (h, k, nv) = (meta[0] as usize, meta[1] as usize, meta[4] as usize);
-        let norms = f64s("table/norms")?;
-        let prep = Prep {
-            n_in: h,
-            impute: f64s("table/impute")?,
-            keep: bundle.i32s("table/keep")?.iter().map(|v| *v as usize).collect(),
-            power: bundle.i32s("table/power")?.iter().map(|v| *v != 0).collect(),
-            norms: (0..nv).map(|v| (0..k).map(|j| ColNorm::from_array(&norms[(v * k + j) * COL_NORM_FIELDS..])).collect()).collect(),
-        };
-        let members = bundle.i32s("table/members")?.chunks_exact(2 + k).map(|r| Member { norm: r[0] as usize, features: r[1..1 + k].iter().map(|v| *v as usize).collect(), classes: vec![0] }).collect();
-        let t = f64s("table/target")?;
+        if !bundle.has("table/target") {
+            return Err(bad("this bundle is not a fitted regression model (a classifier, perhaps)".into()));
+        }
+        let (prep, rows, _) = open_table(bundle, |_| 1)?;
+        let k = prep.keep.len();
+        let members = rows.iter().map(|r| Member { norm: r[0] as usize, features: r[1..1 + k].iter().map(|v| *v as usize).collect(), classes: vec![0] }).collect();
+        let t: Vec<f64> = bytemuck::pod_collect_to_vec(&bundle.bytes("table/target")?);
+        if t.len() != 2 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "fitted regression model: table/target is damaged"));
+        }
         Ok(Regressor { bundle, prep, members, target_mean: t[0], target_scale: t[1] })
     }
 

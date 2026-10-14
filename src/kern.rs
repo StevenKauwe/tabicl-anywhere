@@ -66,6 +66,10 @@ pub fn scale<S: Simd>(simd: S, alpha: f32, y: &mut [f32]) {
 pub fn matvec<S: Simd>(simd: S, w: &[f32], x: &[f32], y: &mut [f32]) {
     let n = x.len();
     debug_assert_eq!(w.len(), n * y.len());
+    if n == 0 {
+        y.fill(0.0);
+        return;
+    }
     let (xh, xt) = S::as_simd_f32s(x);
     let nv = xh.len();
     let z = simd.splat_f32s(0.0);
@@ -130,6 +134,9 @@ pub fn linear<S: Simd>(simd: S, w: &[f32], b: &[f32], x: &[f32], y: &mut [f32]) 
 pub fn weighted_sum<S: Simd>(simd: S, wts: &[f32], rows: &[f32], acc: &mut [f32]) {
     let n = acc.len();
     debug_assert_eq!(rows.len(), n * wts.len());
+    if n == 0 {
+        return;
+    }
     let (ah, at) = S::as_mut_simd_f32s(acc);
     let nv = ah.len();
     let mut rc = rows.chunks_exact(4 * n);
@@ -238,7 +245,11 @@ pub fn erf1(x: f32) -> f32 {
     q = q * x2 - 1.0 / 3.0;
     q = q * x2 + 1.0;
     let near = q * x * std::f32::consts::FRAC_2_SQRT_PI;
-    if a < 0.5 { near } else { far }
+    if a < 0.5 {
+        near
+    } else {
+        far
+    }
 }
 
 /// GELU as PyTorch defines it by default: `x * 0.5 * (1 + erf(x / sqrt 2))`.
@@ -262,6 +273,9 @@ pub fn tanh1(x: f32) -> f32 {
 pub fn weighted_sum_int<T: Copy + Into<f32>>(wts: &[f32], rows: &[T], acc: &mut [f32]) {
     let n = acc.len();
     debug_assert_eq!(rows.len(), n * wts.len());
+    if n == 0 {
+        return;
+    }
     let mut rc = rows.chunks_exact(4 * n);
     let mut wc = wts.chunks_exact(4);
     for (blk, w) in (&mut rc).zip(&mut wc) {
@@ -285,7 +299,11 @@ pub fn weighted_sum_int<T: Copy + Into<f32>>(wts: &[f32], rows: &[T], acc: &mut 
 pub fn matvec_int<T: Copy + Into<f32>>(rows: &[T], x: &[f32], y: &mut [f32]) {
     let n = x.len();
     debug_assert_eq!(rows.len(), n * y.len());
-    for (row, out) in rows.chunks_exact(n.max(1)).zip(y.iter_mut()) {
+    if n == 0 {
+        y.fill(0.0);
+        return;
+    }
+    for (row, out) in rows.chunks_exact(n).zip(y.iter_mut()) {
         let mut a = [0.0f32; 16];
         let mut rc = row.chunks_exact(16);
         let mut xc = x.chunks_exact(16);
@@ -395,5 +413,112 @@ mod tests {
             assert!((y[o] - want).abs() < 1e-4 && (y2[o] - want).abs() < 1e-4, "{o}: {} {} {want}", y[o], y2[o]);
         }
     }
-}
 
+    fn data(n: usize, seed: usize) -> Vec<f32> {
+        (0..n).map(|i| (((i + seed) * 7919 % 2003) as f32 - 1001.0) * 1e-3).collect()
+    }
+
+    /// Every SIMD kernel against a plain loop, at every length from 0 to 70 (so every split between vector
+    /// body and scalar tail is met), with the scalar path and the best one this CPU offers.
+    #[test]
+    fn simd_kernels_at_every_length() {
+        struct All;
+        impl pulp::WithSimd for All {
+            type Output = ();
+            fn with_simd<S: Simd>(self, simd: S) {
+                for n in 0..70usize {
+                    let (a, b) = (data(n, 1), data(n, 2));
+                    let want: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
+                    assert!((dot(simd, &a, &b) - want).abs() < 1e-4, "dot {n}");
+                    let mut y = b.clone();
+                    axpy(simd, 0.5, &a, &mut y);
+                    assert!(y.iter().zip(a.iter().zip(&b)).all(|(v, (x, z))| (v - (z + 0.5 * x)).abs() < 1e-6), "axpy {n}");
+                    scale(simd, -2.0, &mut y);
+                    assert!(y.iter().zip(a.iter().zip(&b)).all(|(v, (x, z))| (v + 2.0 * (z + 0.5 * x)).abs() < 1e-5), "scale {n}");
+                    let m = max(simd, &a);
+                    assert_eq!(m, a.iter().copied().fold(f32::NEG_INFINITY, f32::max), "max {n}");
+                    for rows in [0usize, 1, 3, 4, 5, 8, 9, 17] {
+                        let w = data(rows * n, 3);
+                        let mut out = vec![0.0f32; rows];
+                        matvec(simd, &w, &a, &mut out);
+                        let bias = data(rows, 4);
+                        let mut lin = vec![0.0f32; rows];
+                        linear(simd, &w, &bias, &a, &mut lin);
+                        for r in 0..rows {
+                            let want: f32 = (0..n).map(|i| w[r * n + i] * a[i]).sum();
+                            assert!((out[r] - want).abs() < 1e-4, "matvec {rows}x{n} row {r}");
+                            assert!((lin[r] - want - bias[r]).abs() < 1e-4);
+                        }
+                        let wts = data(rows, 5);
+                        let mut acc = b.clone();
+                        weighted_sum(simd, &wts, &w, &mut acc);
+                        for i in 0..n {
+                            let want = b[i] + (0..rows).map(|r| wts[r] * w[r * n + i]).sum::<f32>();
+                            assert!((acc[i] - want).abs() < 1e-4, "weighted_sum {rows}x{n} at {i}");
+                        }
+                    }
+                    if n > 0 {
+                        let (w, bb) = (data(n, 6), data(n, 7));
+                        let mut y = vec![0.0f32; n];
+                        layer_norm(simd, &a, &w, &bb, &mut y);
+                        let mean = a.iter().sum::<f32>() / n as f32;
+                        let var = a.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n as f32;
+                        for i in 0..n {
+                            let want = (a[i] - mean) / (var + 1e-5).sqrt() * w[i] + bb[i];
+                            assert!((y[i] - want).abs() < 1e-4, "layer_norm {n} at {i}: {} {want}", y[i]);
+                        }
+                    }
+                }
+            }
+        }
+        use pulp::WithSimd;
+        pulp::Arch::new().dispatch(All);
+        All.with_simd(pulp::Scalar::new());
+    }
+
+    #[test]
+    fn softmax_pieces() {
+        for n in [0usize, 1, 7, 8, 9, 23] {
+            let mut x = data(n, 9);
+            let orig = x.clone();
+            let s = exp_shift_sum(&mut x, 0.25);
+            for (v, o) in x.iter().zip(&orig) {
+                assert!((v - ((o - 0.25) as f64).exp() as f32).abs() < 1e-6);
+            }
+            assert!((s - x.iter().sum::<f32>()).abs() < 1e-5);
+        }
+        assert_eq!(exp1(-1000.0), exp1(-87.0), "clamped below: no denormal or zero surprises");
+        assert!(exp1(1000.0).is_finite(), "clamped above: never infinity");
+        let mut g = vec![-10.0f32, -1.0, 0.0, 0.1, 1.0, 10.0];
+        gelu(&mut g);
+        let want = [-0.0, -0.158_655_25, 0.0, 0.053_982_8, 0.841_344_7, 10.0];
+        for (a, b) in g.iter().zip(want) {
+            assert!((a - b).abs() < 1e-6, "{a} {b}");
+        }
+        assert_eq!(tanh1(100.0), tanh1(10.0));
+        assert!((tanh1(-0.5) + 0.462_117_16).abs() < 1e-6);
+    }
+
+    #[test]
+    fn integer_kernels_at_every_length() {
+        for n in 0..40usize {
+            for rows in [0usize, 1, 3, 4, 5, 9] {
+                let r8: Vec<i8> = (0..rows * n).map(|i| ((i * 37) % 255) as i8).collect();
+                let w = data(rows, 1);
+                let mut acc = vec![0.5f32; n];
+                weighted_sum_int(&w, &r8, &mut acc);
+                for i in 0..n {
+                    let want = 0.5 + (0..rows).map(|r| w[r] * r8[r * n + i] as f32).sum::<f32>();
+                    assert!((acc[i] - want).abs() < 1e-3, "{rows}x{n}");
+                }
+                let x = data(n, 2);
+                let mut y = vec![0.0f32; rows];
+                matvec_int(&r8, &x, &mut y);
+                for r in 0..rows {
+                    let want: f32 = (0..n).map(|i| r8[r * n + i] as f32 * x[i]).sum();
+                    assert!((y[r] - want).abs() < 1e-3, "{rows}x{n} row {r}");
+                }
+            }
+        }
+    }
+}

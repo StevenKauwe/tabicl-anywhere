@@ -97,6 +97,13 @@ pub struct Sealed<R: ReadAt> {
     len: u64,
 }
 
+/// Shows the plain length only: never the key.
+impl<R: ReadAt> std::fmt::Debug for Sealed<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Sealed({} plain bytes)", self.len)
+    }
+}
+
 impl<R: ReadAt> Sealed<R> {
     pub fn open(inner: R, key: &[u8; 32]) -> io::Result<Sealed<R>> {
         let mut head = [0u8; HEAD];
@@ -128,9 +135,7 @@ impl<R: ReadAt> ReadAt for Sealed<R> {
             let at = (stored(b) - stored(first)) as usize;
             let n = plain_len(b);
             let (body, tag) = raw[at..at + n + TAG].split_at_mut(n);
-            self.cipher
-                .decrypt_in_place_detached(&nonce(&self.id, b), MAGIC, body, Tag::from_slice(tag))
-                .map_err(|_| bad("sealed bundle did not open: wrong key, or the data has been altered"))?;
+            self.cipher.decrypt_in_place_detached(&nonce(&self.id, b), MAGIC, body, Tag::from_slice(tag)).map_err(|_| bad("sealed bundle did not open: wrong key, or the data has been altered"))?;
             let block_start = b * BLOCK as u64;
             let (from, to) = (offset.max(block_start), end.min(block_start + n as u64));
             buf[(from - offset) as usize..(to - offset) as usize].copy_from_slice(&body[(from - block_start) as usize..(to - block_start) as usize]);

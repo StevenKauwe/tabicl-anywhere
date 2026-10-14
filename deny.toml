@@ -1,0 +1,38 @@
+# cargo-deny: what the dependency tree may contain. `cargo deny check` runs weekly in CI (.github/workflows/audit.yml).
+
+[graph]
+# check the optional graphics-card dependencies too, on every platform they are built for
+all-features = true
+
+[advisories]
+# any security advisory or unmaintained notice for a crate we use fails the check; yanked versions too
+yanked = "deny"
+ignore = [
+    # `paste` (a compile-time macro helper, pulled in by `pulp`) is archived by its author. It runs only while
+    # compiling and has no known vulnerability; revisit when pulp moves off it.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained compile-time-only macro crate used by pulp; no vulnerability" },
+]
+
+[licenses]
+# permissive licences only: everything here is compatible with shipping BrowserTabICL under BSD-3-Clause
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+# a path dependency inside this workspace (wasm/ -> ..) is not a wildcard
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

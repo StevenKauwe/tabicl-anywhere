@@ -47,8 +47,10 @@ try {
   await page.goto(base + "/index.html");
   await page.waitForFunction(() => /Engine running/.test(document.getElementById("hw-engine").textContent), { timeout: 40000 });
   console.log("     " + (await text(page, "#hw-engine")));
+  await page.waitForFunction(() => !/getting it ready|Looking/.test(document.getElementById("hw-gpu").textContent), { timeout: 40000 });
   console.log("     " + (await text(page, "#hw-gpu")));
-  check(/processor/.test(await text(page, "#hw-gpu")), "the page says what graphics hardware it found and that it runs on the processor");
+  // headless Chromium offers only a software stand-in for a card, which the page reports and passes over
+  check(/Graphics card/.test(await text(page, "#hw-gpu")) && /processor/.test(await text(page, "#hw-gpu")), "the page says what graphics hardware it found and that the processor is used");
   await page.waitForFunction(() => !document.getElementById("storage-line").hidden);
   console.log("     " + (await text(page, "#storage-line")));
   await shot(page, "1-start-desktop-light");

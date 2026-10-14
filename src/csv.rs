@@ -138,11 +138,7 @@ impl Schema {
     /// Features (`[rows][columns]`) of a table with a header, by column name; the target column need not be there.
     pub fn features(&self, rows: &[Vec<String>]) -> io::Result<Vec<f64>> {
         let head = rows.first().ok_or_else(|| bad("empty table".into()))?;
-        let at: Vec<usize> = self
-            .columns
-            .iter()
-            .map(|(n, _)| head.iter().position(|h| h.trim() == n).ok_or_else(|| bad(format!("the table has no column named {n}"))))
-            .collect::<io::Result<_>>()?;
+        let at: Vec<usize> = self.columns.iter().map(|(n, _)| head.iter().position(|h| h.trim() == n).ok_or_else(|| bad(format!("the table has no column named {n}")))).collect::<io::Result<_>>()?;
         let mut x = Vec::with_capacity((rows.len() - 1) * at.len());
         for (i, r) in rows[1..].iter().enumerate() {
             for (&j, (name, cats)) in at.iter().zip(&self.columns) {

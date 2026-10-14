@@ -5,7 +5,8 @@ set -e
 cd "$(dirname "$0")/.."
 RUSTFLAGS="-C target-feature=+simd128" cargo build --release -p browsertabicl-wasm --target wasm32-unknown-unknown
 W="${CARGO_TARGET_DIR:-target}"/wasm32-unknown-unknown/release/browsertabicl_wasm.wasm
-wasm-bindgen --target web --out-dir pkg/web "$W"
+# (the names of functions are left out of the browser build: 0.5 MB that only a debugger uses)
+wasm-bindgen --target web --remove-name-section --out-dir pkg/web "$W"
 wasm-bindgen --target nodejs --out-dir pkg/node "$W"
 # the page in site/ loads the browser build from site/pkg
 mkdir -p site/pkg

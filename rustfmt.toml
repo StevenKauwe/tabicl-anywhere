@@ -1,0 +1,6 @@
+# The code is written wide on purpose: a whole step of arithmetic on one line reads better than one spread over
+# ten. These settings were chosen by measuring: they keep the existing layout almost everywhere (about 600 of
+# 10,900 lines changed when they were introduced), where rustfmt's defaults would have rewritten over 3,000.
+max_width = 200
+use_small_heuristics = "Max"
+fn_params_layout = "Compressed"

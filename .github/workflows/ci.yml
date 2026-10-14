@@ -1,0 +1,132 @@
+# Every push and pull request: formatting, lints, tests on Linux, macOS and Windows, the WebAssembly build and its
+# Node tests, the minimum supported Rust version, and a coverage report.
+#
+# GitHub's machines have no graphics card and none of the 1.2 GB generated fixtures (fixtures/, not committed), so
+# the comparisons against the reference run on what is committed instead (see tests/common/mod.rs):
+#   * tests/data: a tiny randomly initialised TabICL checkpoint and the reference's numbers for it, compared at
+#     full precision; and small tables with the reference's answers from the real weights;
+#   * docs/weights: the real weights at 16-bit precision (the web page's copy), compared at 16-bit tolerances.
+# Tests that need fixtures/ or a graphics card skip with a note. Card code is compiled and linted here on all three
+# systems, and run locally (tests/card.rs, tools/test-card-browser.mjs) on a machine with a card.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  # The release profile links with fat LTO for the shipped program; tests do not need that and it would make each
+  # test binary take minutes to link. Same code and arithmetic, faster to build.
+  CARGO_PROFILE_RELEASE_LTO: "off"
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Lints (including the graphics-card code)
+        run: cargo clippy --all-targets --features gpu -- -D warnings
+      - name: Tests
+        run: cargo test --release
+      - name: Tests with the graphics-card code built in (card tests skip without a card)
+        run: cargo test --release --features gpu
+      - name: Documentation builds without warnings
+        run: cargo doc --no-deps --features gpu
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  wasm:
+    name: WebAssembly build and Node tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install wasm-bindgen (the version in Cargo.lock)
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: wasm-bindgen@0.2.129
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Build the engine for the browser and for Node
+        run: tools/build-wasm.sh
+      - name: The committed page runs the same engine that was just built
+        run: cmp site/pkg/browsertabicl_wasm_bg.wasm docs/pkg/browsertabicl_wasm_bg.wasm || echo "::warning::docs/pkg is not the engine built from this commit; run tools/deploy-docs.sh"
+      - name: Engine against the reference, under Node
+        run: node tools/test-wasm.cjs
+      - name: The page's own logic, under Node
+        run: |
+          cargo build --release
+          node tools/test-site.mjs
+
+  msrv:
+    name: minimum supported Rust (1.90)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10
+        with:
+          toolchain: "1.90"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo check --all-targets --features gpu
+      - run: cargo test --release --test pipeline --test reference
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-llvm-cov
+      - name: Measure (no graphics card here: card code is counted as not run)
+        run: |
+          cargo llvm-cov --release --workspace --exclude browsertabicl-wasm --lcov --output-path lcov.info
+          cargo llvm-cov report --release --html --output-dir coverage
+      - name: Summary
+        run: |
+          {
+            echo "### Test coverage (CPU only; GitHub's machines have no graphics card)"
+            echo '```'
+            cargo llvm-cov report --release --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: |
+            lcov.info
+            coverage/

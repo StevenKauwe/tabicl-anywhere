@@ -4,6 +4,11 @@
 // read a CSV table, fit ONE ensemble member, or predict with one member. Nothing here touches the network
 // except loading the engine file that sits next to this script.
 //
+// One of them may also be the graphics-card worker: after a `card` request it holds the browser's WebGPU device
+// and does fit and predict requests marked `card: true` there, one member after another (a card does one job at
+// a time anyway). A failure on the card is reported with `card: true` in the reply, so the page can tell it from
+// a problem with the table and hand the job to the processor workers instead.
+//
 // Messages in:  { id, op, ...arguments }
 // Messages out: { id, ok: true, result }  or  { id, ok: false, error, fatal }
 //               (fatal: this worker's engine is no longer usable, e.g. it ran out of memory; start a new one)
@@ -11,6 +16,8 @@ import init, * as engine from "./pkg/browsertabicl_wasm.js";
 
 let started = null;
 const held = {}; // "classifier" | "regressor" -> Weights
+let card = null; // the engine's Card, once a `card` request has opened one
+let pretendFailure = false; // for trying out the page's fallback: the next card job fails as a lost card would
 
 /** Start the engine once. `source` (optional) is the .wasm as bytes, a URL or a Response; the default is the file next to the script. */
 export function boot(source) {
@@ -35,6 +42,30 @@ const ops = {
     let rate = 0;
     for (let i = 0; i < 16 && calibrateMs > 0; i++) rate = Math.max(rate, engine.calibrate(calibrateMs / 16));
     return { result: { rate, mem: mem() } };
+  },
+
+  /** Open the graphics card (once) and measure it. Fails where the browser offers no WebGPU or no usable card. */
+  async card({ workMB = 768, modelsMB = 1024, calibrateMs = 300, limitMB = 0, failNext = false }) {
+    pretendFailure = failNext;
+    if (typeof navigator === "undefined" || !navigator.gpu) throw new Error("this browser offers no graphics card to web pages (no WebGPU)");
+    const t = performance.now();
+    if (!card) {
+      if (!(await navigator.gpu.requestAdapter({ powerPreference: "high-performance" }))) throw new Error("the browser offers WebGPU but found no graphics card it can use");
+      card = await engine.Card.open(workMB, modelsMB);
+    }
+    const opened = performance.now() - t;
+    const rate = calibrateMs > 0 ? await card.calibrate(calibrateMs) : 0;
+    if (limitMB > 0) card.setWorkMb(limitMB); // for trying out what happens when the card runs short
+    // the browser's own words for the card (the engine sees only what WebGPU tells it, often nothing)
+    let adapter = "", software = card.software;
+    try {
+      const a = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+      const i = (a && a.info) || {};
+      adapter = [i.vendor, i.architecture, i.description || i.device].filter(Boolean).join(" ");
+      // a program standing in for a card (Chromium's "swiftshader", Mesa's "llvmpipe")
+      software = software || !!(a && (a.isFallbackAdapter || i.isFallbackAdapter)) || /swiftshader|llvmpipe|software/i.test(adapter);
+    } catch { /* not told */ }
+    return { result: { name: card.name, adapter, software, rate, openMs: opened, ms: performance.now() - t } };
   },
 
   /** Column summary of CSV text. */
@@ -77,10 +108,16 @@ const ops = {
     return { result: { mem: mem() } };
   },
 
-  /** Fit one member of the ensemble; returns the fitted member as bytes. */
-  fit({ kind, x, y, rows, features, estimators, member, kv, schema }) {
+  /** Fit one member of the ensemble; returns the fitted member as bytes. With `card`, on the graphics card. */
+  async fit({ kind, x, y, rows, features, estimators, member, kv, schema, card: onCard }) {
     const t = performance.now();
     const w = weights(kind);
+    if (onCard) {
+      const bytes = await onTheCard(() => kind === "regressor"
+        ? w.fitRegressorMemberCard(theCard(), x, y, rows, features, estimators, member, kv, schema || "")
+        : w.fitClassifierMemberCard(theCard(), x, y, rows, features, estimators, member, kv, schema || ""));
+      return { result: { bytes, ms: performance.now() - t, mem: mem(), card: true }, transfer: [bytes.buffer] };
+    }
     const bytes = kind === "regressor"
       ? w.fitRegressorMember(x, y, rows, features, estimators, member, kv, schema || "")
       : w.fitClassifierMember(x, y, rows, features, estimators, member, kv, schema || "");
@@ -88,9 +125,13 @@ const ops = {
   },
 
   /** Predict with one fitted member: score sums (classifier) or mean/median/5%/95% per row (regressor). */
-  async predict({ kind, blob, x, rows }) {
+  async predict({ kind, blob, x, rows, card: onCard, key }) {
     const t = performance.now();
     const fitted = await bytesOf(blob);
+    if (onCard) {
+      const r = await onTheCard(() => weights(kind).predictCard(theCard(), key, fitted, x, rows));
+      return { result: { out: r.out, ms: performance.now() - t, mem: mem(), cardLayers: r.cardLayers, problem: r.problem }, transfer: [r.out.buffer] };
+    }
     const out = kind === "regressor" ? weights(kind).predictRegression(fitted, x, rows) : weights(kind).predictSums(fitted, x, rows);
     return { result: { out, ms: performance.now() - t, mem: mem() }, transfer: [out.buffer] };
   },
@@ -101,6 +142,26 @@ const ops = {
     return { result: { proba: p }, transfer: [p.buffer] };
   },
 };
+
+function theCard() {
+  if (!card) throw new Error("the graphics card has not been opened in this worker");
+  return card;
+}
+
+/** Run a job on the card; anything that goes wrong is marked as the card's failure. */
+async function onTheCard(job) {
+  try {
+    if (pretendFailure) {
+      pretendFailure = false;
+      throw new Error("the device was lost (pretended, as asked for by the page address)");
+    }
+    return await job();
+  } catch (e) {
+    const err = new Error(`the graphics card failed (${e && e.message ? e.message : e})`);
+    err.card = true;
+    throw err;
+  }
+}
 
 /** Run one message; never throws. */
 export async function handle(msg, wasmSource) {
@@ -119,7 +180,7 @@ export async function handle(msg, wasmSource) {
     const text = String(e && e.message ? e.message : e);
     // The engine stops dead (rather than unwinding) when it cannot get memory or hits an internal error.
     const fatal = (typeof WebAssembly !== "undefined" && e instanceof WebAssembly.RuntimeError) || e instanceof RangeError || /unreachable|out of memory|memory access|allocation/i.test(text);
-    return { id: msg.id, ok: false, fatal, error: fatal ? `the engine ran out of memory or stopped unexpectedly (${text})` : text };
+    return { id: msg.id, ok: false, fatal, card: !!(e && e.card), error: fatal ? `the engine ran out of memory or stopped unexpectedly (${text})` : text };
   }
 }
 

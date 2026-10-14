@@ -1,5 +1,10 @@
 # BrowserTabICL
 
+[![CI](https://github.com/StevenKauwe/browsertabicl/actions/workflows/ci.yml/badge.svg)](https://github.com/StevenKauwe/browsertabicl/actions/workflows/ci.yml)
+[![Dependencies](https://github.com/StevenKauwe/browsertabicl/actions/workflows/audit.yml/badge.svg)](https://github.com/StevenKauwe/browsertabicl/actions/workflows/audit.yml)
+[![Licence: BSD-3-Clause](https://img.shields.io/badge/licence-BSD--3--Clause-blue.svg)](LICENSE)
+[![Rust 1.90+](https://img.shields.io/badge/rust-1.90%2B-orange.svg)](Cargo.toml)
+
 An independent implementation of the TabICL v2 tabular model (classification and regression) in safe Rust
 (`#![forbid(unsafe_code)]` in the core). It runs natively on CPU, optionally with a graphics card, and in the
 browser as WebAssembly. The published PyTorch implementation is used only as the thing to agree with.
@@ -50,12 +55,22 @@ const fitted = weights.fitClassifier(x, y, rows, features, 8, "i16");   // Uint8
 const proba = weights.predictProba(fitted, xNew, newRows);
 ```
 
-Single-threaded for now, and not yet tried in an actual browser (verified under Node).
+One thread per WebAssembly instance; the page in `site/` runs one worker per ensemble member, and, where the
+browser offers WebGPU, one more that fits and predicts on the graphics card (`Card.open()`, then the `...Card`
+methods, which return Promises). See `site/README.md`.
 
 ## Does it agree with the reference?
 
-`cargo test --release` compares against numbers dumped from the reference (`tools/dump_*.py`; fixtures are
-generated, not checked in):
+`cargo test --release` compares against numbers dumped from the reference (`tools/dump_*.py`). Two sets of data:
+
+* **Committed, always run (CI too):** a tiny randomly initialised TabICL v2 checkpoint with the reference's
+  numbers for it (`tests/data`, 0.6 MB), compared at full precision (differences about 1e-6, allowed 5e-5 per
+  stage and 1e-5 on probabilities); and small tables with the reference's answers from the real weights, run
+  with the 16-bit weights in `docs/weights` (allowed 5e-3 on probabilities, 1% of the targets' spread in
+  regression; measured 7e-4 and 0.35%).
+* **Generated, about 1.2 GB, not committed (`fixtures/`):** the full-precision published weights and larger tables.
+  Without them those tests print `fixtures missing, skipping ...` and pass; CONTRIBUTING.md says how to make them.
+  The table below is from these:
 
 | what | worst difference |
 |---|---|
@@ -79,7 +94,9 @@ generated, not checked in):
 | 64 rows | 174 ms streamed, 145 ms warm | 88 ms (321 ms on one thread) |
 | one row, model resident on the card | 8 ms | 16 ms (PyTorch CUDA, same 3090) |
 | 64 / 256 / 2,048 rows on the card | 16 / 35 / 240 ms | 16 / 17 / 71 ms (PyTorch CUDA) |
-| fit on the card | 2.5 s, 726 MB peak | 1.3 s (PyTorch CUDA) |
+| fit on the card | 2.4 s, 726 MB peak | 1.3 s (PyTorch CUDA) |
+| card working memory after 2,048 rows | 1.46 GB, never above its 1.5 GB budget (was about 3 GB, unbounded) | |
+| 2,048 rows with a 256 MB working budget | 327 ms (cut into sub-batches) | |
 | model in graphics memory | 285 MB (16-bit) | |
 | one row from an encrypted i16 cache | 261 ms (116 ms with 8 readers) | n/a |
 
@@ -88,22 +105,40 @@ The card's answers differ from the CPU's by at most 1e-4 in raw score (same answ
 cache fitted on the card predicts the same as one fitted on the CPU to 1e-4.
 Low-memory fitting (`--mem`) writes a byte-identical cache and takes about twice as long.
 
+## Graphics card
+
+Built with `--features gpu` (wgpu: Vulkan, Metal, DirectX natively; the browser's WebGPU in WebAssembly, with the
+same WGSL shaders). Prediction runs all three stages on the card from a tenant-scoped graphics-memory tier
+(`gpu::VramTier`; natively the first prediction is answered by the CPU while the card loads, `preload` loads at
+once); fitting runs all three stages on it (`--gpu`; label-digit tables keep their column stage on the CPU).
+
+* One code path for both: everything that waits for the card is `async` and waits in one place; the native,
+  blocking functions are `wait::block_on` of the `_async` ones (the top of `src/gpu.rs` explains why).
+* Memory, at worst: the tier's budget for fitted models + the card's working-memory budget
+  (`Gpu::set_work_budget`, 1.5 GB by default) + about 81 MB of weights per model kind. Batches too large for the
+  working budget are cut into sub-batches that run back to back; fitting sizes its batches to it.
+  `Gpu::release` frees the idle working buffers, `VramTier::evict` fitted models.
+* The tier's budgets hold for what is really on the card, models evicted but still in use by a prediction
+  included; a model larger than its tenant's budget is never uploaded and is answered by the CPU. If the card
+  fails (out of memory, lost) the CPU answers and `VramTier::fallbacks` / `last_error` say so.
+* `cargo test --release --features gpu` (tests/card.rs, about 10 s, needs `fixtures/`) compares the card with the CPU: prediction
+  of 1, 64 and 300 rows, 14 classes, the 16-bit cache, the regression model (fit and predict), a cache fitted on
+  the card; the working budget (never exceeded, sub-batches give the same answers, `release` frees it all); two
+  tenants predicting at once from two threads while one is evicted throughout; a model over its tenant's budget.
+  Worst differences: probabilities 1e-7 to 9e-5, regression 3e-5 on a spread of 50. Skipped, with a note, where
+  there is no graphics adapter.
+
 ## Not done yet
 
-* Graphics card: prediction runs all three stages on it in one submission, from a tenant-scoped graphics-memory
-  tier (`gpu::VramTier`; the first prediction is answered by the CPU while the card loads), and fitting runs all
-  three stages on it too (`--gpu`; label-digit tables keep their column stage on the CPU). The shaders are
-  portable WGSL: blocks of queries against blocks of keys, blocks of rows against blocks of weights. Up to 64 rows
-  that matches or beats PyTorch's CUDA build; at 2,048 rows it is 3.4x behind and fitting is 1.9x behind. What is
-  left is mostly arithmetic the card does at about a seventh of its peak rate (PyTorch uses half precision and
-  the card's matrix hardware, which WGSL cannot reach), plus, in fitting, about 0.5 s of copying cells between
-  main and graphics memory. Tried and not kept: holding all attention scores in graphics memory between two
-  passes (moving them cost more than the arithmetic), 4 x 8 register blocks, four queries per invocation in the
+* Graphics card: up to 64 rows it matches or beats PyTorch's CUDA build; at 2,048 rows it is 3.4x behind and
+  fitting is 1.8x behind. What is left is mostly arithmetic the card does at about a seventh of its peak rate
+  (PyTorch uses half precision and the card's matrix hardware, which WGSL cannot reach), plus, in fitting,
+  about 0.5 s of copying cells between main and graphics memory. Tried and not kept: holding all attention
+  scores in graphics memory between two passes, 4 x 8 register blocks, four queries per invocation in the
   in-context attention. Not tried: folding each layer norm into the matrix after it, half-precision floats where
-  the card offers them. The working buffers of the last call (about 3 GB after 2,048 rows) stay allocated
-  outside the tier's budget until the next call. Also open: WebGPU in the browser (needs the loops made
-  asynchronous).
-* Browser: threads, a demo page, streaming a model over the network instead of holding it in memory.
+  the card offers them. In a browser, more than 10 classes is left to the processor by default (the column stage
+  then runs on one processor thread beside the card).
+* Browser: streaming a model over the network instead of holding it in memory.
 * Gradient training (pre-training or fine-tuning).
 * Speed on batches: the reference's matrix library is still about 2x ahead on 64 rows.
 
@@ -113,6 +148,12 @@ Low-memory fitting (`--mem`) writes a byte-identical cache and takes about twice
 storage traits - `crypt` sealing - `warm` in-memory tier - `ckpt` checkpoint reader - `model` weights - `nn`
 blocks - `fit` / `predict` network passes - `gpu` (optional) - `prep` preprocessing and Python-compatible shuffles -
 `csv` - `table` classifier and regressor - `bin/browsertabicl` command line - `wasm/` JavaScript bindings.
+
+## Contributing, security, changes
+
+Building, testing and regenerating the test data: [CONTRIBUTING.md](CONTRIBUTING.md). Reporting a security problem,
+and what the encryption does and does not protect: [SECURITY.md](SECURITY.md). Release notes:
+[CHANGELOG.md](CHANGELOG.md). Everyone taking part follows the [code of conduct](CODE_OF_CONDUCT.md).
 
 ## Licences
 

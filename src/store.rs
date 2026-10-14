@@ -13,13 +13,15 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io;
-use std::sync::{Arc, Mutex};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 #[cfg(not(target_endian = "little"))]
 compile_error!("BrowserTabICL stores little-endian floats and reads them in place; big-endian targets are not supported");
 
 const MAGIC: &[u8; 8] = b"TIRSBNDL";
+/// Largest index a bundle may have (64 MiB: about a million tensors).
+const MAX_INDEX: u64 = 64 << 20;
 
 #[derive(Clone, Debug)]
 pub struct Entry {
@@ -31,8 +33,13 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// Number of elements (the product of the dimensions).
     pub fn len(&self) -> usize {
         self.dims.iter().product()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -130,10 +137,16 @@ impl MemStore {
     }
 }
 
+/// Where a read of `len` bytes at `offset` ends, or `usize::MAX` (always past the end) if that cannot be
+/// addressed at all, so an absurd offset is an end-of-data error rather than an overflow.
+fn range_end(offset: u64, len: usize) -> usize {
+    usize::try_from(offset).ok().and_then(|o| o.checked_add(len)).unwrap_or(usize::MAX)
+}
+
 impl ReadAt for Arc<MemStore> {
     fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
         let all = self.0.lock().unwrap();
-        let end = offset as usize + buf.len();
+        let end = range_end(offset, buf.len());
         if end > all.len() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "read past the end of the bundle bytes"));
         }
@@ -145,7 +158,7 @@ impl ReadAt for Arc<MemStore> {
 impl Storage for Arc<MemStore> {
     fn write_all_at(&self, data: &[u8], offset: u64) -> io::Result<()> {
         let mut all = self.0.lock().unwrap();
-        let end = offset as usize + data.len();
+        let end = usize::try_from(offset).ok().and_then(|o| o.checked_add(data.len())).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "write beyond what memory can address"))?;
         if end > all.len() {
             all.resize(end, 0);
         }
@@ -161,7 +174,7 @@ impl Storage for Arc<MemStore> {
 impl<T: AsRef<[u8]> + Send + Sync> ReadAt for Arc<T> {
     fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
         let all: &[u8] = (**self).as_ref();
-        let end = offset as usize + buf.len();
+        let end = range_end(offset, buf.len());
         if end > all.len() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "read past the end of the bundle bytes"));
         }
@@ -221,14 +234,73 @@ pub fn parts_manifest(total: usize, parts: &[(String, usize)]) -> String {
     format!("{{\n  \"format\": \"browsertabicl-parts-1\",\n  \"bytes\": {total},\n  \"parts\": [\n{}\n  ]\n}}\n", list.join(",\n"))
 }
 
+/// Read a manifest written by `parts_manifest`: the total length and each part's file name and length.
+/// Only what `parts_manifest` writes is understood (it is not a general JSON reader).
+pub fn read_parts_manifest(text: &str) -> io::Result<(usize, Vec<(String, usize)>)> {
+    if !text.contains("\"browsertabicl-parts-1\"") {
+        return Err(bad("not a BrowserTabICL parts list (browsertabicl-parts-1)".into()));
+    }
+    let number = |s: &str| -> io::Result<usize> {
+        let digits: String = s.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().map_err(|_| bad(format!("parts list: expected a number at '{}'", s.chars().take(20).collect::<String>())))
+    };
+    let (head, list) = text.split_once("\"parts\"").ok_or_else(|| bad("parts list has no \"parts\"".into()))?;
+    let total = number(head.split_once("\"bytes\":").ok_or_else(|| bad("parts list has no total \"bytes\"".into()))?.1)?;
+    let mut parts = Vec::new();
+    for piece in list.split("\"file\":").skip(1) {
+        let name = piece.trim_start().strip_prefix('"').and_then(|s| s.split_once('"')).map(|(n, _)| n.to_string()).ok_or_else(|| bad("parts list: a file name is not quoted".into()))?;
+        if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+            return Err(bad(format!("parts list: '{name}' is not a plain file name")));
+        }
+        let bytes = number(piece.split_once("\"bytes\":").ok_or_else(|| bad(format!("parts list: no length for {name}")))?.1)?;
+        parts.push((name, bytes));
+    }
+    if parts.iter().map(|p| p.1).sum::<usize>() != total {
+        return Err(bad(format!("parts list: the parts add up to {} bytes, the total says {total}", parts.iter().map(|p| p.1).sum::<usize>())));
+    }
+    Ok((total, parts))
+}
+
+/// Put parts back together: `read(name)` fetches one part (from beside the manifest). Every part's length and
+/// the total are checked, so a missing or truncated part is an error rather than a damaged bundle.
+pub fn join_parts(manifest: &str, mut read: impl FnMut(&str) -> io::Result<Vec<u8>>) -> io::Result<Vec<u8>> {
+    let (total, parts) = read_parts_manifest(manifest)?;
+    let mut out = Vec::with_capacity(total);
+    for (name, bytes) in parts {
+        let part = read(&name)?;
+        if part.len() != bytes {
+            return Err(bad(format!("{name} is {} bytes, the parts list says {bytes}", part.len())));
+        }
+        out.extend(part);
+    }
+    Ok(out)
+}
+
 pub struct Bundle {
     pub file: Box<dyn ReadAt>,
     pub entries: Vec<Entry>,
     by_name: HashMap<String, usize>,
 }
 
+/// Bytes per element of each tensor type a bundle may hold.
+fn dtype_size(d: &str) -> Option<usize> {
+    match d {
+        "float32" | "int32" => Some(4),
+        "float16" => Some(2),
+        "uint8" | "int8" => Some(1),
+        "float64" | "int64" => Some(8),
+        _ => None,
+    }
+}
+
 fn bad(msg: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
+}
+
+impl std::fmt::Debug for Bundle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Bundle({} tensors)", self.entries.len())
+    }
 }
 
 impl Bundle {
@@ -245,7 +317,13 @@ impl Bundle {
         if &head[..8] != MAGIC {
             return Err(bad("not a BrowserTabICL bundle".into()));
         }
-        let mut index = vec![0u8; u64::from_le_bytes(head[8..].try_into().unwrap()) as usize];
+        let index_len = u64::from_le_bytes(head[8..].try_into().unwrap());
+        // a real index is a line of text per tensor; anything near this size is a damaged or foreign file, and
+        // refusing it here avoids trying to allocate whatever a damaged header claims
+        if index_len > MAX_INDEX {
+            return Err(bad(format!("bundle index claims {index_len} bytes; the file is damaged")));
+        }
+        let mut index = vec![0u8; index_len as usize];
         file.read_exact_at(&mut index, 16)?;
         let text = String::from_utf8(index).map_err(|e| bad(e.to_string()))?;
         let mut entries = Vec::new();
@@ -256,6 +334,13 @@ impl Bundle {
             let num = |s: &str| s.parse::<u64>().map_err(|e| bad(format!("{line}: {e}")));
             let (offset, nbytes) = (num(next()?)?, num(next()?)?);
             let dims = p.map(|s| num(s).map(|v| v as usize)).collect::<io::Result<Vec<_>>>()?;
+            // the shape must account for exactly the stored bytes, so no later read can be asked to allocate more
+            // than the entry really holds
+            let width = dtype_size(&dtype).ok_or_else(|| bad(format!("{line}: unknown tensor type")))?;
+            let count = dims.iter().try_fold(1usize, |a, d| a.checked_mul(*d));
+            if count.and_then(|c| c.checked_mul(width)) != Some(nbytes as usize) || offset.checked_add(nbytes).is_none() {
+                return Err(bad(format!("{line}: shape and length disagree; the file is damaged")));
+            }
             entries.push(Entry { name, dtype, offset, nbytes, dims });
         }
         let by_name = entries.iter().enumerate().map(|(i, e)| (e.name.clone(), i)).collect();
@@ -340,13 +425,12 @@ impl BundleWriter {
 
     /// As `create`, on any storage (for instance a `MemStore`).
     pub fn create_on(file: Box<dyn Storage>, tensors: &[(&str, &str, Vec<usize>)]) -> io::Result<BundleWriter> {
-        let size = |d: &str| match d {
-            "float32" | "int32" => 4,
-            "float16" => 2,
-            "uint8" | "int8" => 1,
-            "float64" | "int64" => 8,
-            _ => panic!("unknown dtype {d}"),
-        };
+        let size = |d: &str| dtype_size(d).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("unknown tensor type {d}")));
+        for (n, _, _) in tensors {
+            if n.is_empty() || n.contains([' ', '\n']) {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("tensor name '{n}' is empty or has a space or line break")));
+            }
+        }
         let line = |n: &str, d: &str, off: u64, nb: u64, dims: &[usize]| {
             let mut s = format!("{n} {d} {off} {nb}");
             for v in dims {
@@ -354,15 +438,15 @@ impl BundleWriter {
             }
             s + "\n"
         };
-        let sizes: Vec<u64> = tensors.iter().map(|(_, d, dims)| (dims.iter().product::<usize>() * size(d)) as u64).collect();
+        let sizes: Vec<u64> = tensors.iter().map(|(_, d, dims)| Ok((dims.iter().product::<usize>() * size(d)?) as u64)).collect::<io::Result<_>>()?;
         let guess: usize = tensors.iter().zip(&sizes).map(|((n, d, dims), nb)| line(n, d, 10u64.pow(15), *nb, dims).len()).sum();
-        let mut pos = ((guess + 16 + 63) / 64 * 64) as u64;
+        let mut pos = ((guess + 16).div_ceil(64) * 64) as u64;
         let mut entries = Vec::new();
         let mut index = String::new();
         for ((n, d, dims), nb) in tensors.iter().zip(&sizes) {
             index += &line(n, d, pos, *nb, dims);
             entries.push(Entry { name: n.to_string(), dtype: d.to_string(), offset: pos, nbytes: *nb, dims: dims.clone() });
-            pos = (pos + nb + 63) / 64 * 64;
+            pos = (pos + nb).div_ceil(64) * 64;
         }
         file.set_len(pos)?;
         let mut head = MAGIC.to_vec();

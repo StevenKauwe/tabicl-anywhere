@@ -1,5 +1,17 @@
-//! Compare against numbers dumped from the reference implementation (tools/dump_raw.py).
-//! Skipped (with a note) if the fixtures have not been generated.
+//! Compare against numbers dumped from the reference implementation (tools/dump_raw.py, dump_table.py,
+//! dump_reg.py).
+//!
+//! * `tiny_*`: a tiny randomly initialised model and the reference's numbers for it (tests/data, committed),
+//!   at full precision: runs everywhere, CI included.
+//! * `docs_half_*`: the real model at 16-bit precision (docs/weights, committed) on small tables whose reference
+//!   answers came from the full-precision weights (tests/data): also runs everywhere.
+//! * the rest: the real full-precision weights and larger tables in fixtures/ (not committed; skipped with a note
+//!   when absent).
+//!
+//! `cargo test --release --test reference -- --nocapture` prints every measured difference.
+
+mod common;
+use common::*;
 
 use browsertabicl::fit::{fit_raw, raw_entries, FitOpts};
 use browsertabicl::model::{Load, Model};
@@ -24,17 +36,15 @@ fn to_ours(r: &[f32], heads: usize, n: usize, hd: usize) -> Vec<f32> {
     o
 }
 
-fn check(name: &str) {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures");
-    let (Ok(wb), Ok(fx)) = (Bundle::open(format!("{dir}/classifier-v2.tirs")), Bundle::open(format!("{dir}/{name}.tirs"))) else {
-        eprintln!("fixtures missing, skipping {name}");
-        return;
-    };
-    let m = Model::load(&wb, Load::Fit).unwrap();
+/// Every stage of the network against the reference: column and in-context caches, test embeddings, row
+/// representations and raw scores. `tol` bounds every difference; `reopen` gives the weights again for the
+/// streamed-weights path.
+fn check(name: &str, wb: &Bundle, fx: &Bundle, reopen: impl Fn() -> Bundle, tol: f32) {
+    let m = Model::load(wb, Load::Fit).unwrap();
     let (x, y) = (fx.f32s("x_train").unwrap(), fx.i32s("y_train").unwrap());
     let (n, h) = (y.len(), x.len() / y.len());
     let classes = *y.iter().max().unwrap() as usize + 1;
-    let out = std::env::temp_dir().join(format!("BrowserTabICL-test-{name}-{}.tirs", std::process::id()));
+    let out = scratch(name);
     let opts = FitOpts { chunk: 48, ..Default::default() };
     let yf: Vec<f32> = y.iter().map(|v| *v as f32).collect();
     let plan = browsertabicl::fit::Plan::new(&m, &yf, classes);
@@ -59,7 +69,7 @@ fn check(name: &str) {
                 bad = bad.max(worst(&ours[at..at + e * inds], &want));
             }
             println!("{name} {kind}{b}: worst difference {bad:.2e}");
-            assert!(bad < 2e-3, "{kind}{b}");
+            assert!(bad < tol, "{kind}{b}");
         }
     }
     // in-context cache
@@ -77,7 +87,7 @@ fn check(name: &str) {
                 }
             }
             println!("{name} {kind}{l}: worst difference {bad:.2e}");
-            assert!(bad < 5e-3, "{kind}{l}");
+            assert!(bad < 2.5 * tol, "{kind}{l}");
         }
     }
     // prediction, resident and streamed weights
@@ -93,43 +103,56 @@ fn check(name: &str) {
         bad = bad.max(worst(&tok[(r * tokens + m.cls) * e..(r + 1) * tokens * e], &want[(r * tokens + m.cls) * e..(r + 1) * tokens * e]));
     }
     println!("{name} test embeddings: worst difference {bad:.2e}");
-    assert!(bad < 2e-3);
+    assert!(bad < tol);
     let mut rep = represent(&m, &mut tok, nt);
     let bad = worst(&rep, &fx.f32s("test_rep").unwrap());
     println!("{name} test row representations: worst difference {bad:.2e}");
-    assert!(bad < 2e-3);
+    assert!(bad < tol);
     let mut rep2 = rep.clone();
     let want = fx.f32s("logits").unwrap();
     let logits = in_context(&m, &mut IclWeights::Resident, &cache, 0, &mut rep, nt, &po, &Stats::default()).unwrap();
     let bad = worst(&logits, &want);
     println!("{name} logits: worst difference {bad:.2e} (values up to {:.1})", want.iter().fold(0.0f32, |a, b| a.max(b.abs())));
-    assert!(bad < 2e-3);
-    let mut streamed = IclWeights::Streamed { bundle: Bundle::open(format!("{dir}/classifier-v2.tirs")).unwrap(), buf: Vec::new() };
+    assert!(bad < tol);
+    let mut streamed = IclWeights::Streamed { bundle: reopen(), buf: Vec::new() };
     let logits2 = in_context(&m, &mut streamed, &cache, 0, &mut rep2, nt, &po, &Stats::default()).unwrap();
     assert_eq!(logits, logits2, "streamed weights must give identical numbers");
     let _ = std::fs::remove_file(out);
 }
 
+fn check_fixture(name: &str) {
+    let (Some(wb), Some(fx)) = (fixture("classifier-v2"), fixture(name)) else {
+        eprintln!("fixtures missing, skipping {name}");
+        return;
+    };
+    check(name, &wb, &fx, || fixture("classifier-v2").unwrap(), 2e-3);
+}
+
 #[test]
 fn small_table() {
-    check("raw-small");
+    check_fixture("raw-small");
 }
 
 #[test]
 fn mid_table() {
-    check("raw-mid");
+    check_fixture("raw-mid");
 }
 
+#[test]
+fn tiny_raw() {
+    check("tiny-raw", &tiny_weights("clf"), &data("tiny-raw"), || tiny_weights("clf"), TINY);
+}
+
+/// The tiny model is run at full precision on both sides, so only rounding separates the two: what remains is
+/// summation order (SIMD lanes against PyTorch's kernels) over a few layers, about 1e-6 on numbers of order 1.
+const TINY: f32 = 5e-5;
+
 /// The whole classifier (preprocessing, ensemble, averaging) against the reference's `TabICLClassifier`.
-fn check_table(name: &str) {
+/// Preprocessing is always compared at 1e-6 (it does not depend on the weights); probabilities at `tol`.
+fn check_table(name: &str, wb: &Bundle, fx: &Bundle, tol: f64) {
     use browsertabicl::prep::{ensemble, Prep};
     use browsertabicl::table::{fit_classifier, Classifier, ClassifierOpts};
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures");
-    let (Ok(wb), Ok(fx)) = (Bundle::open(format!("{dir}/classifier-v2.tirs")), Bundle::open(format!("{dir}/{name}.tirs"))) else {
-        eprintln!("fixtures missing, skipping {name}");
-        return;
-    };
-    let f64s = |n: &str| -> Vec<f64> { bytemuck::pod_collect_to_vec(&fx.bytes(n).unwrap()) };
+    let f64s = |n: &str| -> Vec<f64> { f64s(fx, n) };
     let (x, y) = (f64s("x_train"), fx.i32s("y_train").unwrap());
     let (n, h) = (y.len(), x.len() / y.len());
     let (y, labels) = browsertabicl::table::encode_labels(&y.iter().map(|v| *v as i64).collect::<Vec<_>>());
@@ -173,8 +196,8 @@ fn check_table(name: &str) {
     }
     println!("{name}: {classes} classes; all {n_members} ensemble members match the reference's");
     // end to end
-    let wm = Model::load(&wb, Load::Fit).unwrap();
-    let out = std::env::temp_dir().join(format!("BrowserTabICL-test-{name}-{}.tirs", std::process::id()));
+    let wm = Model::load(wb, Load::Fit).unwrap();
+    let out = scratch(name);
     fit_classifier(&wm, &x, &y, n, h, &out, &ClassifierOpts { n_estimators: n_members, ..Default::default() }).unwrap();
     let cb = Bundle::open(&out).unwrap();
     let clf = Classifier::open(&cb).unwrap();
@@ -183,35 +206,71 @@ fn check_table(name: &str) {
     let want = f64s("proba");
     let bad = proba.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
     println!("{name} class probabilities: worst difference {bad:.2e}\n{st}");
-    assert!(bad < 2e-4);
+    assert!(bad < tol, "{name}: probabilities differ by {bad:.2e}");
     let _ = std::fs::remove_file(out);
+}
+
+fn check_table_fixture(name: &str) {
+    let (Some(wb), Some(fx)) = (fixture("classifier-v2"), fixture(name)) else {
+        eprintln!("fixtures missing, skipping {name}");
+        return;
+    };
+    check_table(name, &wb, &fx, 2e-4);
 }
 
 #[test]
 fn table_a() {
-    check_table("table-a");
+    check_table_fixture("table-a");
 }
 
 #[test]
 fn table_b() {
-    check_table("table-b");
+    check_table_fixture("table-b");
 }
 
+#[test]
+fn tiny_table() {
+    check_table("tiny-table", &tiny_weights("clf"), &data("tiny-table"), 1e-5);
+}
 
-/// The regression model end to end against the reference's `TabICLRegressor`.
-fn check_regression(name: &str, members: usize) {
+#[test]
+fn tiny_one_member() {
+    check_table("tiny-one", &tiny_weights("clf"), &data("tiny-one"), 1e-5);
+}
+
+#[test]
+fn tiny_many_classes() {
+    check_table("tiny-many", &tiny_weights("clf"), &data("tiny-many"), 1e-5);
+}
+
+/// The real model at 16-bit precision against the reference's full-precision answers. Narrowing every large
+/// weight to 16 bits moved a probability by at most 7e-4 on these tables (2e-5 on table-b), so 5e-3 here:
+/// room for other processors' rounding, still tight enough that any real mistake (which moves probabilities by
+/// tenths) fails.
+const HALF: f64 = 5e-3;
+
+#[test]
+fn docs_half_table_b() {
+    let Some(wb) = docs_weights("classifier") else { return eprintln!("docs/weights missing, skipping") };
+    check_table("table-b (16-bit weights)", &wb, &data("table-b"), HALF);
+}
+
+#[test]
+fn docs_half_many_classes() {
+    let Some(wb) = docs_weights("classifier") else { return eprintln!("docs/weights missing, skipping") };
+    check_table("many-a (16-bit weights)", &wb, &data("many-a"), HALF);
+}
+
+/// The regression model end to end against the reference's `TabICLRegressor`. `tol` is a fraction of the
+/// targets' spread (their deviation about 50, the value the generator centres them on).
+fn check_regression(name: &str, wb: &Bundle, fx: &Bundle, members: usize, tol: f64) {
     use browsertabicl::table::{fit_regressor, ClassifierOpts, Regressor};
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures");
-    let (Ok(wb), Ok(fx)) = (Bundle::open(format!("{dir}/regressor-v2.tirs")), Bundle::open(format!("{dir}/{name}.tirs"))) else {
-        eprintln!("fixtures missing, skipping {name}");
-        return;
-    };
-    let f64s = |n: &str| -> Vec<f64> { bytemuck::pod_collect_to_vec(&fx.bytes(n).unwrap()) };
+    let f64s = |n: &str| -> Vec<f64> { f64s(fx, n) };
     let (x, y, xt, alphas) = (f64s("x_train"), f64s("y_train"), f64s("x_test"), f64s("alphas"));
     let (n, h) = (y.len(), x.len() / y.len());
     let nt = xt.len() / h;
-    let wm = Model::load(&wb, Load::Fit).unwrap();
-    let out = std::env::temp_dir().join(format!("BrowserTabICL-test-{name}-{}.tirs", std::process::id()));
+    let wm = Model::load(wb, Load::Fit).unwrap();
+    let out = scratch(name);
     fit_regressor(&wm, &x, &y, n, h, &out, &ClassifierOpts { n_estimators: members, ..Default::default() }).unwrap();
     let cb = Bundle::open(&out).unwrap();
     let reg = Regressor::open(&cb).unwrap();
@@ -221,27 +280,57 @@ fn check_regression(name: &str, members: usize) {
         let want = f64s(kind);
         let bad = ours.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
         println!("{name} {kind}: worst difference {bad:.2e} (targets spread about {spread:.1})");
-        assert!(bad < 2e-3, "{kind}");
+        // the variance is not in the targets' units; it is compared only at full precision
+        if kind != "variance" || tol < 1e-3 {
+            assert!(bad < tol * spread, "{name} {kind}: {bad:.2e}");
+        }
     }
     let _ = std::fs::remove_file(out);
 }
 
+fn check_regression_fixture(name: &str, members: usize) {
+    let (Some(wb), Some(fx)) = (fixture("regressor-v2"), fixture(name)) else {
+        eprintln!("fixtures missing, skipping {name}");
+        return;
+    };
+    check_regression(name, &wb, &fx, members, 2e-4);
+}
+
 #[test]
 fn regression_a() {
-    check_regression("reg-a", 4);
+    check_regression_fixture("reg-a", 4);
 }
 
 #[test]
 fn regression_b() {
-    check_regression("reg-b", 1);
+    check_regression_fixture("reg-b", 1);
+}
+
+#[test]
+fn tiny_regression_a() {
+    check_regression("tiny-reg-a", &tiny_weights("reg"), &data("tiny-reg-a"), 4, 1e-5);
+}
+
+#[test]
+fn tiny_regression_b() {
+    check_regression("tiny-reg-b", &tiny_weights("reg"), &data("tiny-reg-b"), 1, 1e-5);
+}
+
+/// 16-bit weights moved a regression answer by at most 0.35% of the targets' spread (an extreme quantile), so
+/// 1% here.
+#[test]
+fn docs_half_regression() {
+    let Some(wb) = docs_weights("regressor") else { return eprintln!("docs/weights missing, skipping") };
+    check_regression("reg-a (16-bit weights)", &wb, &data("reg-a"), 4, 0.01);
+    check_regression("reg-b (16-bit weights)", &wb, &data("reg-b"), 1, 0.01);
 }
 
 #[test]
 fn many_classes_a() {
-    check_table("many-a");
+    check_table_fixture("many-a");
 }
 
 #[test]
 fn many_classes_b() {
-    check_table("many-b");
+    check_table_fixture("many-b");
 }

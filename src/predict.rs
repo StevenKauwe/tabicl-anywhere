@@ -146,7 +146,17 @@ impl<'b> Cache<'b> {
             nodes.push(NodeInfo { leaf, rows: tree[at + 1] as usize, k, map: tree[at + 3..at + 3 + k].iter().map(|v| *v as usize).collect() });
             at += 3 + k;
         }
-        Ok(Cache { bundle, prefix: prefix.to_string(), rows: meta[0] as usize, features: meta[1] as usize, classes: meta[2] as usize, chunk: meta[3] as usize, kv: Kv::from_code(meta[4]), digits: meta[5] as usize, nodes })
+        Ok(Cache {
+            bundle,
+            prefix: prefix.to_string(),
+            rows: meta[0] as usize,
+            features: meta[1] as usize,
+            classes: meta[2] as usize,
+            chunk: meta[3] as usize,
+            kv: Kv::from_code(meta[4]),
+            digits: meta[5] as usize,
+            nodes,
+        })
     }
 }
 
@@ -193,7 +203,12 @@ impl IclWeights {
     fn parts<'a>(&'a self, lens: &[usize]) -> Vec<&'a [f32]> {
         let IclWeights::Streamed { buf, .. } = self else { unreachable!() };
         let mut at = 0;
-        lens.iter().map(|l| { at += l; &buf[at - l..at] }).collect()
+        lens.iter()
+            .map(|l| {
+                at += l;
+                &buf[at - l..at]
+            })
+            .collect()
     }
 
     fn query<'a>(&'a mut self, m: &'a Model, l: usize, st: &Stats) -> io::Result<QueryW<'a>> {
@@ -201,7 +216,16 @@ impl IclWeights {
             return Ok(m.icl[l].query_w());
         }
         let d = m.d;
-        let names = ["norm1.weight", "norm1.bias", "attn.in_proj_weight", "attn.in_proj_bias", "attn.ssmax_layer.query_mlp.0.weight", "attn.ssmax_layer.query_mlp.0.bias", "attn.ssmax_layer.query_mlp.2.weight", "attn.ssmax_layer.query_mlp.2.bias"];
+        let names = [
+            "norm1.weight",
+            "norm1.bias",
+            "attn.in_proj_weight",
+            "attn.in_proj_bias",
+            "attn.ssmax_layer.query_mlp.0.weight",
+            "attn.ssmax_layer.query_mlp.0.bias",
+            "attn.ssmax_layer.query_mlp.2.weight",
+            "attn.ssmax_layer.query_mlp.2.bias",
+        ];
         let lens = self.pull(l, &names, &[None, None, Some(d * d), Some(d), None, None, None, None], st)?;
         let p = self.parts(&lens);
         Ok(QueryW { heads: m.icl_heads, n1w: p[0], n1b: p[1], qw: p[2], qb: p[3], ss: Some((p[4], p[5], p[6], p[7])) })
@@ -274,52 +298,56 @@ pub fn embed(m: &Model, c: &Cache, x: &[f32], n: usize, opts: &PredictOpts) -> i
         c.bundle.read_f32_at(&name, g0 * rec_len, &mut recs[..gc * rec_len])?;
         let (recs, scale) = (&recs[..gc * rec_len], &scale[..]);
         let items: Vec<(&mut [f32], &[f32])> = tok.chunks_exact_mut(tokens * e).zip(x.chunks_exact(feats)).collect();
-        each(items, || Ws::new(e, m.col_heads, m.col[0].a2.ff, inds), |ws, (t, xr)| {
-            with_simd!(|simd| [m: &'a Model, ws: &'a mut Ws, t: &'a mut [f32], xr: &'a [f32], recs: &'a [f32], scale: &'a [f32], g0: usize, gc: usize, digits: usize] -> () {
-                let (e, inds) = (m.e, m.inds);
-                let rec_len = recs.len() / gc;
-                let mut vals = [0.0f32; 8];
-                let vals = &mut vals[..m.group];
-                for gi in 0..gc {
-                    let g = g0 + gi;
-                    let cell = &mut t[(m.cls + g) * e..(m.cls + g + 1) * e];
-                    group_values(xr, g, m.group, vals);
-                    if vals.iter().all(|v| *v == -100.0) {
-                        cell.fill(-100.0);
-                    } else {
-                        linear(simd, &m.in_w, &m.in_b, vals, cell);
-                    }
-                    let per = 2 * e * inds;
-                    let nb = m.col.len();
-                    if digits == 1 {
-                        for (bi, isab) in m.col.iter().enumerate() {
-                            let (rk, rv) = recs[gi * rec_len + bi * per..gi * rec_len + (bi + 1) * per].split_at(e * inds);
-                            cached_block(simd, &isab.a2, scale, rk, rv, inds, cell, ws);
+        each(
+            items,
+            || Ws::new(e, m.col_heads, m.col[0].a2.ff, inds),
+            |ws, (t, xr)| {
+                with_simd!(|simd| [m: &'a Model, ws: &'a mut Ws, t: &'a mut [f32], xr: &'a [f32], recs: &'a [f32], scale: &'a [f32], g0: usize, gc: usize, digits: usize] -> () {
+                    let (e, inds) = (m.e, m.inds);
+                    let rec_len = recs.len() / gc;
+                    let mut vals = [0.0f32; 8];
+                    let vals = &mut vals[..m.group];
+                    for gi in 0..gc {
+                        let g = g0 + gi;
+                        let cell = &mut t[(m.cls + g) * e..(m.cls + g + 1) * e];
+                        group_values(xr, g, m.group, vals);
+                        if vals.iter().all(|v| *v == -100.0) {
+                            cell.fill(-100.0);
+                        } else {
+                            linear(simd, &m.in_w, &m.in_b, vals, cell);
                         }
-                    } else {
-                        // once per label digit, then the average (as at fit time)
-                        let mut plain = [0.0f32; 512];
-                        let mut sum = [0.0f32; 512];
-                        let mut one = [0.0f32; 512];
-                        plain[..e].copy_from_slice(cell);
-                        for dg in 0..digits {
-                            one[..e].copy_from_slice(&plain[..e]);
+                        let per = 2 * e * inds;
+                        let nb = m.col.len();
+                        if digits == 1 {
                             for (bi, isab) in m.col.iter().enumerate() {
-                                let at = gi * rec_len + (dg * nb + bi) * per;
-                                let (rk, rv) = recs[at..at + per].split_at(e * inds);
-                                cached_block(simd, &isab.a2, scale, rk, rv, inds, &mut one[..e], ws);
+                                let (rk, rv) = recs[gi * rec_len + bi * per..gi * rec_len + (bi + 1) * per].split_at(e * inds);
+                                cached_block(simd, &isab.a2, scale, rk, rv, inds, cell, ws);
+                            }
+                        } else {
+                            // once per label digit, then the average (as at fit time)
+                            let mut plain = [0.0f32; 512];
+                            let mut sum = [0.0f32; 512];
+                            let mut one = [0.0f32; 512];
+                            plain[..e].copy_from_slice(cell);
+                            for dg in 0..digits {
+                                one[..e].copy_from_slice(&plain[..e]);
+                                for (bi, isab) in m.col.iter().enumerate() {
+                                    let at = gi * rec_len + (dg * nb + bi) * per;
+                                    let (rk, rv) = recs[at..at + per].split_at(e * inds);
+                                    cached_block(simd, &isab.a2, scale, rk, rv, inds, &mut one[..e], ws);
+                                }
+                                for i in 0..e {
+                                    sum[i] += one[i];
+                                }
                             }
                             for i in 0..e {
-                                sum[i] += one[i];
+                                cell[i] = sum[i] / digits as f32;
                             }
                         }
-                        for i in 0..e {
-                            cell[i] = sum[i] / digits as f32;
-                        }
                     }
-                }
-            });
-        });
+                });
+            },
+        );
     }
     Ok(tok)
 }
@@ -331,11 +359,15 @@ pub fn represent(m: &Model, tok: &mut [f32], n: usize) -> Vec<f32> {
     let mut rep = vec![0.0f32; n * m.d];
     let items: Vec<(&mut [f32], &mut [f32])> = tok.chunks_exact_mut(tokens * m.e).zip(rep.chunks_exact_mut(m.d)).collect();
     let rope = &rope;
-    each(items, || RowWs::new(m, tokens), |ws, (t, r)| {
-        with_simd!(|simd| [m: &'a Model, rope: &'a Rope, ws: &'a mut RowWs, t: &'a mut [f32], r: &'a mut [f32], tokens: usize] -> () {
-            row_forward(simd, m, rope, t, tokens, ws, r)
-        });
-    });
+    each(
+        items,
+        || RowWs::new(m, tokens),
+        |ws, (t, r)| {
+            with_simd!(|simd| [m: &'a Model, rope: &'a Rope, ws: &'a mut RowWs, t: &'a mut [f32], r: &'a mut [f32], tokens: usize] -> () {
+                row_forward(simd, m, rope, t, tokens, ws, r)
+            });
+        },
+    );
     rep
 }
 
@@ -347,7 +379,8 @@ pub fn in_context(m: &Model, w: &mut IclWeights, c: &Cache, node: usize, h: &mut
 
 /// `in_context` in the form that can wait for an accelerator without blocking (see `wait`).
 pub async fn in_context_async(m: &Model, w: &mut IclWeights, c: &Cache<'_>, node: usize, h: &mut [f32], n: usize, opts: &PredictOpts, st: &Stats) -> io::Result<Vec<f32>> {
-    let c = &Cache { bundle: c.bundle, prefix: c.prefix.clone(), rows: c.nodes[node].rows, features: c.features, classes: c.nodes[node].k, chunk: c.chunk, kv: c.kv, digits: c.digits, nodes: Vec::new() };
+    let c =
+        &Cache { bundle: c.bundle, prefix: c.prefix.clone(), rows: c.nodes[node].rows, features: c.features, classes: c.nodes[node].k, chunk: c.chunk, kv: c.kv, digits: c.digits, nodes: Vec::new() };
     let (d, heads, chunk) = (m.d, m.icl_heads, c.chunk);
     let ff = m.dec0b.len();
     if let Some(a) = &opts.accel {
@@ -372,11 +405,7 @@ pub async fn in_context_async(m: &Model, w: &mut IclWeights, c: &Cache<'_>, node
         ws: Ws,
     }
     let mut parts: Vec<Part> = (0..parts_n)
-        .map(|_| Part {
-            raw: vec![0u32; (chunks_per_read.min(n_chunks) * full).div_ceil(4)],
-            softs: (0..n).map(|_| Soft::new(heads, d)).collect(),
-            ws: Ws::new(d, heads, ff, chunk),
-        })
+        .map(|_| Part { raw: vec![0u32; (chunks_per_read.min(n_chunks) * full).div_ceil(4)], softs: (0..n).map(|_| Soft::new(heads, d)).collect(), ws: Ws::new(d, heads, ff, chunk) })
         .collect();
     let mut qk = vec![0.0f32; if c.kv == Kv::F32 { 0 } else { parts_n * n * d }];
     let mut mid = vec![0.0f32; n * ff];
@@ -396,106 +425,111 @@ pub async fn in_context_async(m: &Model, w: &mut IclWeights, c: &Cache<'_>, node
             None => None,
         };
         if on_card.is_none() {
-        let per = reads.len().div_ceil(parts_n);
-        let kvf = c.kv;
-        let rows_total = c.rows;
-        let run = |part: &mut Part, qk: &mut [f32], mine: &[usize], spread: bool| -> io::Result<()> {
-            let Part { raw, softs, ws } = part;
-            softs.iter_mut().for_each(|s| s.reset());
-            for &c0 in mine {
-                let cn = chunks_per_read.min(n_chunks - c0);
-                let last_rows = (rows_total - (c0 + cn - 1) * chunk).min(chunk);
-                let bytes = (cn - 1) * full + kvf.record(d, last_rows);
-                let t = Instant::now();
-                let load = |words: &mut [u32]| -> io::Result<()> {
-                    c.bundle.read_bytes_at(&name, c0 * full, &mut bytemuck::cast_slice_mut::<u32, u8>(words)[..bytes])?;
-                    st.cache_bytes.fetch_add(bytes as u64, Relaxed);
-                    Ok(())
-                };
-                // from the warm tier in place if there is one, otherwise into this reader's own buffer
-                let held = match &opts.warm {
-                    Some(w) => Some(w.get(&name, (c0 * full) as u64, || {
-                        let mut words = vec![0u32; bytes.div_ceil(4)];
-                        load(&mut words)?;
-                        Ok(words)
-                    })?),
-                    None => {
-                        load(&mut raw[..])?;
-                        None
-                    }
-                };
-                let raw: &[u32] = held.as_ref().map_or(&raw[..], |p| &p.words[..]);
-                st.add(&st.cache_read_ns, t);
-                let t = Instant::now();
-                for ci in 0..cn {
-                    let rc = if ci + 1 == cn { last_rows } else { chunk };
-                    let rec = &raw[ci * full / 4..(ci * full + kvf.record(d, rc)) / 4];
-                    // the chunk in place, as stored: `[K: d][rc]`, `[V: d][rc]`, after the scales if integers
-                    let chunk_ref = if kvf == Kv::F32 {
-                        let all: &[f32] = bytemuck::cast_slice(rec);
-                        let (kt, vt) = all.split_at(d * rc);
-                        Chunk::F32(kt, vt)
-                    } else {
-                        let (sc, body) = rec.split_at(2 * d);
-                        let body: &[u8] = bytemuck::cast_slice(body);
-                        let sc: &[f32] = bytemuck::cast_slice(sc);
-                        if kvf == Kv::I16 {
-                            let all: &[i16] = bytemuck::cast_slice(body);
-                            let (kt, vt) = all.split_at(d * rc);
-                            Chunk::I16(kt, vt, sc)
-                        } else {
-                            let all: &[i8] = bytemuck::cast_slice(body);
-                            let (kt, vt) = all.split_at(d * rc);
-                            Chunk::I8(kt, vt, sc)
+            let per = reads.len().div_ceil(parts_n);
+            let kvf = c.kv;
+            let rows_total = c.rows;
+            let run = |part: &mut Part, qk: &mut [f32], mine: &[usize], spread: bool| -> io::Result<()> {
+                let Part { raw, softs, ws } = part;
+                softs.iter_mut().for_each(|s| s.reset());
+                for &c0 in mine {
+                    let cn = chunks_per_read.min(n_chunks - c0);
+                    let last_rows = (rows_total - (c0 + cn - 1) * chunk).min(chunk);
+                    let bytes = (cn - 1) * full + kvf.record(d, last_rows);
+                    let t = Instant::now();
+                    let load = |words: &mut [u32]| -> io::Result<()> {
+                        c.bundle.read_bytes_at(&name, c0 * full, &mut bytemuck::cast_slice_mut::<u32, u8>(words)[..bytes])?;
+                        st.cache_bytes.fetch_add(bytes as u64, Relaxed);
+                        Ok(())
+                    };
+                    // from the warm tier in place if there is one, otherwise into this reader's own buffer
+                    let held = match &opts.warm {
+                        Some(w) => Some(w.get(&name, (c0 * full) as u64, || {
+                            let mut words = vec![0u32; bytes.div_ceil(4)];
+                            load(&mut words)?;
+                            Ok(words)
+                        })?),
+                        None => {
+                            load(&mut raw[..])?;
+                            None
                         }
                     };
-                    let one = |ws: &mut Ws, ((s, qr), qs): ((&mut Soft, &[f32]), &mut [f32])| {
-                        with_simd!(|simd| [ws: &'a mut Ws, s: &'a mut Soft, qr: &'a [f32], qs: &'a mut [f32], chunk_ref: Chunk<'a>, rc: usize] -> () {
-                            let d = qr.len();
-                            match chunk_ref {
-                                Chunk::F32(kt, vt) => s.update(simd, qr, kt, vt, rc, &mut ws.sc, &mut ws.tmp),
-                                Chunk::I16(kt, vt, sc) => {
-                                    for i in 0..d {
-                                        qs[i] = qr[i] * sc[i];
-                                    }
-                                    s.update_int(simd, qs, kt, vt, &sc[d..], rc, &mut ws.sc, &mut ws.tmp)
-                                }
-                                Chunk::I8(kt, vt, sc) => {
-                                    for i in 0..d {
-                                        qs[i] = qr[i] * sc[i];
-                                    }
-                                    s.update_int(simd, qs, kt, vt, &sc[d..], rc, &mut ws.sc, &mut ws.tmp)
-                                }
+                    let raw: &[u32] = held.as_ref().map_or(&raw[..], |p| &p.words[..]);
+                    st.add(&st.cache_read_ns, t);
+                    let t = Instant::now();
+                    for ci in 0..cn {
+                        let rc = if ci + 1 == cn { last_rows } else { chunk };
+                        let rec = &raw[ci * full / 4..(ci * full + kvf.record(d, rc)) / 4];
+                        // the chunk in place, as stored: `[K: d][rc]`, `[V: d][rc]`, after the scales if integers
+                        let chunk_ref = if kvf == Kv::F32 {
+                            let all: &[f32] = bytemuck::cast_slice(rec);
+                            let (kt, vt) = all.split_at(d * rc);
+                            Chunk::F32(kt, vt)
+                        } else {
+                            let (sc, body) = rec.split_at(2 * d);
+                            let body: &[u8] = bytemuck::cast_slice(body);
+                            let sc: &[f32] = bytemuck::cast_slice(sc);
+                            if kvf == Kv::I16 {
+                                let all: &[i16] = bytemuck::cast_slice(body);
+                                let (kt, vt) = all.split_at(d * rc);
+                                Chunk::I16(kt, vt, sc)
+                            } else {
+                                let all: &[i8] = bytemuck::cast_slice(body);
+                                let (kt, vt) = all.split_at(d * rc);
+                                Chunk::I8(kt, vt, sc)
                             }
-                        });
-                    };
-                    // with float storage `qk` is empty; hand each row an empty scratch then
-                    let qd = if kvf == Kv::F32 { 0 } else { d };
-                    let mut empty = Vec::new();
-                    let qss: Vec<&mut [f32]> = if qd == 0 { empty.resize_with(softs.len(), || -> &mut [f32] { &mut [] }); empty } else { qk.chunks_exact_mut(d).collect() };
-                    let items: Vec<_> = softs.iter_mut().zip(q.chunks_exact(d)).zip(qss).collect();
-                    if spread {
-                        each(items, new_ws, one);
-                    } else {
-                        items.into_iter().for_each(|it| one(ws, it));
+                        };
+                        let one = |ws: &mut Ws, ((s, qr), qs): ((&mut Soft, &[f32]), &mut [f32])| {
+                            with_simd!(|simd| [ws: &'a mut Ws, s: &'a mut Soft, qr: &'a [f32], qs: &'a mut [f32], chunk_ref: Chunk<'a>, rc: usize] -> () {
+                                let d = qr.len();
+                                match chunk_ref {
+                                    Chunk::F32(kt, vt) => s.update(simd, qr, kt, vt, rc, &mut ws.sc, &mut ws.tmp),
+                                    Chunk::I16(kt, vt, sc) => {
+                                        for i in 0..d {
+                                            qs[i] = qr[i] * sc[i];
+                                        }
+                                        s.update_int(simd, qs, kt, vt, &sc[d..], rc, &mut ws.sc, &mut ws.tmp)
+                                    }
+                                    Chunk::I8(kt, vt, sc) => {
+                                        for i in 0..d {
+                                            qs[i] = qr[i] * sc[i];
+                                        }
+                                        s.update_int(simd, qs, kt, vt, &sc[d..], rc, &mut ws.sc, &mut ws.tmp)
+                                    }
+                                }
+                            });
+                        };
+                        // with float storage `qk` is empty; hand each row an empty scratch then
+                        let qd = if kvf == Kv::F32 { 0 } else { d };
+                        let mut empty = Vec::new();
+                        let qss: Vec<&mut [f32]> = if qd == 0 {
+                            empty.resize_with(softs.len(), || -> &mut [f32] { &mut [] });
+                            empty
+                        } else {
+                            qk.chunks_exact_mut(d).collect()
+                        };
+                        let items: Vec<_> = softs.iter_mut().zip(q.chunks_exact(d)).zip(qss).collect();
+                        if spread {
+                            each(items, new_ws, one);
+                        } else {
+                            items.into_iter().for_each(|it| one(ws, it));
+                        }
                     }
+                    st.add(&st.attention_ns, t);
                 }
-                st.add(&st.attention_ns, t);
+                Ok(())
+            };
+            if parts_n == 1 {
+                run(&mut parts[0], &mut qk, &reads, true)?;
+            } else {
+                let qd = (n * d).max(1);
+                let mut none: Vec<Vec<f32>> = (0..parts_n).map(|_| Vec::new()).collect();
+                let qks: Vec<&mut [f32]> = if c.kv == Kv::F32 { none.iter_mut().map(|v| &mut v[..]).collect() } else { qk.chunks_mut(qd).collect() };
+                parts.par_iter_mut().zip(reads.par_chunks(per)).zip(qks).try_for_each(|((part, mine), qk)| run(part, qk, mine, false))?;
+                let (first, rest) = parts.split_at_mut(1);
+                for p in rest.iter() {
+                    first[0].softs.iter_mut().zip(&p.softs).for_each(|(a, b)| a.merge(b));
+                }
             }
-            Ok(())
-        };
-        if parts_n == 1 {
-            run(&mut parts[0], &mut qk, &reads, true)?;
-        } else {
-            let qd = (n * d).max(1);
-            let mut none: Vec<Vec<f32>> = (0..parts_n).map(|_| Vec::new()).collect();
-            let qks: Vec<&mut [f32]> = if c.kv == Kv::F32 { none.iter_mut().map(|v| &mut v[..]).collect() } else { qk.chunks_mut(qd).collect() };
-            parts.par_iter_mut().zip(reads.par_chunks(per)).zip(qks).try_for_each(|((part, mine), qk)| run(part, qk, mine, false))?;
-            let (first, rest) = parts.split_at_mut(1);
-            for p in rest.iter() {
-                first[0].softs.iter_mut().zip(&p.softs).for_each(|(a, b)| a.merge(b));
-            }
-        }
         }
         let softs = &mut parts[0].softs;
         if let Some(att) = &on_card {
@@ -535,15 +569,19 @@ pub async fn in_context_async(m: &Model, w: &mut IclWeights, c: &Cache<'_>, node
     }
     let mut logits = vec![0.0f32; n * c.classes];
     let classes = c.classes;
-    each(logits.chunks_exact_mut(classes).zip(h.chunks_exact(d)).collect(), || (new_ws(), vec![0.0f32; m.dec2b.len()]), |(ws, all), (lr, hr)| {
-        with_simd!(|simd| [m: &'a Model, ws: &'a mut Ws, all: &'a mut [f32], lr: &'a mut [f32], hr: &'a [f32]] -> () {
-            layer_norm(simd, hr, &m.lnw, &m.lnb, &mut ws.t);
-            linear(simd, &m.dec0w, &m.dec0b, &ws.t, &mut ws.h);
-            gelu(&mut ws.h);
-            linear(simd, &m.dec2w, &m.dec2b, &ws.h, all);
-            lr.copy_from_slice(&all[..lr.len()]);
-        });
-    });
+    each(
+        logits.chunks_exact_mut(classes).zip(h.chunks_exact(d)).collect(),
+        || (new_ws(), vec![0.0f32; m.dec2b.len()]),
+        |(ws, all), (lr, hr)| {
+            with_simd!(|simd| [m: &'a Model, ws: &'a mut Ws, all: &'a mut [f32], lr: &'a mut [f32], hr: &'a [f32]] -> () {
+                layer_norm(simd, hr, &m.lnw, &m.lnb, &mut ws.t);
+                linear(simd, &m.dec0w, &m.dec0b, &ws.t, &mut ws.h);
+                gelu(&mut ws.h);
+                linear(simd, &m.dec2w, &m.dec2b, &ws.h, all);
+                lr.copy_from_slice(&all[..lr.len()]);
+            });
+        },
+    );
     Ok(logits)
 }
 

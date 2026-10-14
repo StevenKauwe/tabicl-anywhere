@@ -91,7 +91,12 @@ fn half_weights_regressor() {
         let spread = (y.iter().map(|v| (v - ym) * (v - ym)).sum::<f64>() / n as f64).sqrt();
         for (kind, f, hv) in [("mean", &rf.mean, &rh.mean), ("median", &rf.median, &rh.median), ("quantiles", &rf.quantiles, &rh.quantiles)] {
             let want = f64s(&fx, kind);
-            println!("{name} {kind}: worst difference from the reference: full weights {:.2e}; half weights {:.2e} (= {:.3}% of the targets' spread, {spread:.1})", worst(f, &want), worst(hv, &want), 100.0 * worst(hv, &want) / spread);
+            println!(
+                "{name} {kind}: worst difference from the reference: full weights {:.2e}; half weights {:.2e} (= {:.3}% of the targets' spread, {spread:.1})",
+                worst(f, &want),
+                worst(hv, &want),
+                100.0 * worst(hv, &want) / spread
+            );
             assert!(worst(hv, &want) < 0.02 * spread, "{kind}");
         }
     }

@@ -1,0 +1,6 @@
+# Network layers take many inputs by nature (weights, sizes, scratch buffers); a struct for each call would only
+# move the list somewhere else.
+too-many-arguments-threshold = 12
+# Matches rustfmt.toml: long expressions on one line are the house style.
+type-complexity-threshold = 400
+msrv = "1.90"

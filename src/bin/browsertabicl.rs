@@ -25,11 +25,11 @@
 //! Everywhere: --threads N sets the size of the thread pool.
 #![forbid(unsafe_code)]
 
-use std::time::Instant;
 use browsertabicl::fit::{fit_raw, raw_entries, FitOpts};
 use browsertabicl::model::{Load, Model};
 use browsertabicl::predict::{predict_raw, Cache, IclWeights, PredictOpts, Stats};
 use browsertabicl::store::{Bundle, BundleWriter};
+use std::time::Instant;
 
 /// Peak and current resident memory of this process in MB, from the kernel's own accounting (Linux).
 fn rss_mb() -> (f64, f64) {
@@ -37,6 +37,8 @@ fn rss_mb() -> (f64, f64) {
     let get = |k: &str| s.lines().find(|l| l.starts_with(k)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 1024.0;
     (get("VmHWM:"), get("VmRSS:"))
 }
+
+const USAGE: &str = "usage: browsertabicl convert|split|join|fit|predict|keygen|seal|bench-...   (see the top of src/bin/browsertabicl.rs)";
 
 fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
@@ -65,13 +67,14 @@ fn accel(args: &[String]) -> std::io::Result<browsertabicl::fit::Accel> {
         return Ok(Default::default());
     }
     #[cfg(feature = "gpu")]
-    {
+    let card = {
         let g = browsertabicl::gpu::Gpu::new()?;
         eprintln!("using {}", g.name);
-        return Ok(browsertabicl::fit::Accel(Some(std::sync::Arc::new(g))));
-    }
+        Ok(browsertabicl::fit::Accel(Some(std::sync::Arc::new(g))))
+    };
     #[cfg(not(feature = "gpu"))]
-    Err(std::io::Error::other("this build has no graphics-card support; rebuild with --features gpu"))
+    let card = Err(std::io::Error::other("this build has no graphics-card support; rebuild with --features gpu"));
+    card
 }
 
 fn main() -> std::io::Result<()> {
@@ -100,7 +103,10 @@ fn main() -> std::io::Result<()> {
                     (0..classes).map(|c| (score(c), c)).fold((f32::MIN, 0), |a, b| if b.0 > a.0 { b } else { a }).1 as i32
                 })
                 .collect();
-            let b = BundleWriter::create(&args[5], &[("x_train", "float32", vec![rows, feats]), ("y_train", "int32", vec![rows]), ("x_test", "float32", vec![test, feats]), ("y_test", "int32", vec![test])])?;
+            let b = BundleWriter::create(
+                &args[5],
+                &[("x_train", "float32", vec![rows, feats]), ("y_train", "int32", vec![rows]), ("x_test", "float32", vec![test, feats]), ("y_test", "int32", vec![test])],
+            )?;
             b.write_f32_at("x_train", 0, &x[..rows * feats])?;
             b.write_f32_at("x_test", 0, &x[rows * feats..])?;
             b.write_bytes("y_train", bytemuck::cast_slice(&y[..rows]))?;
@@ -114,10 +120,8 @@ fn main() -> std::io::Result<()> {
             let (x, y) = (data.f32s("x_train")?, data.i32s("y_train")?);
             let (rows, feats) = (y.len(), x.len() / y.len());
             let classes = *y.iter().max().unwrap() as usize + 1;
-            
-            let mut opts = FitOpts::default();
-            opts.kv = kv_flag(&args);
-            opts.accel = accel(&args)?;
+
+            let mut opts = FitOpts { kv: kv_flag(&args), accel: accel(&args)?, ..Default::default() };
             if let Some(v) = flag(&args, "--mem") {
                 opts.mem_budget = v.parse::<usize>().expect("--mem MEGABYTES") << 20;
             }
@@ -162,13 +166,20 @@ fn main() -> std::io::Result<()> {
             // --card MB: put the model in graphics memory (up to that budget). The first prediction is answered by
             // the CPU while it loads; then the card takes over.
             #[cfg(feature = "gpu")]
+            let mut card = None;
+            #[cfg(feature = "gpu")]
             if let Some(mb) = flag(&args, "--card") {
                 use browsertabicl::gpu::{Gpu, GpuWeights, VramTier};
                 let gpu = std::sync::Arc::new(Gpu::new()?);
+                if let Some(w) = flag(&args, "--work") {
+                    gpu.set_work_budget(w.parse::<usize>().expect("--work MEGABYTES") << 20);
+                }
+                card = Some(gpu.clone());
                 let budget = mb.parse::<usize>().expect("--card MEGABYTES") << 20;
                 let tier = VramTier::new(gpu.clone(), budget, budget);
                 assert!(resident, "--card needs --resident (the in-context weights are uploaded from memory)");
                 let gw = std::sync::Arc::new(GpuWeights::new(&gpu, &m));
+                let gw_bytes = gw.bytes;
                 opts.accel = Some(tier.handle("bench", &args[2], std::sync::Arc::new(open_model(&args[2], &args)?), gw));
                 let t = Instant::now();
                 predict_raw(&m, &mut w, &cache, &x[..n * cache.features], n, &opts, &Stats::default())?;
@@ -176,8 +187,15 @@ fn main() -> std::io::Result<()> {
                 while tier.ready("bench") == 0 && t.elapsed().as_secs() < 60 {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
-                println!("{}: first prediction (CPU, streaming) {first:.1} ms; card holds {:.0} MB after {:.0} ms", gpu.name, tier.held("bench").0 as f64 / 1e6, t.elapsed().as_secs_f64() * 1e3);
-                predict_raw(&m, &mut w, &cache, &x[..n * cache.features], n, &opts, &Stats::default())?; // warm the pipeline
+                println!(
+                    "{}: first prediction (CPU, streaming) {first:.1} ms; card holds {:.0} MB of fitted model (and {:.0} MB of weights) after {:.0} ms",
+                    gpu.name,
+                    tier.held("bench").0 as f64 / 1e6,
+                    gw_bytes as f64 / 1e6,
+                    t.elapsed().as_secs_f64() * 1e3
+                );
+                predict_raw(&m, &mut w, &cache, &x[..n * cache.features], n, &opts, &Stats::default())?;
+                // warm the pipeline
             }
             let loaded = t0.elapsed().as_secs_f64();
             let (base_peak, _) = rss_mb();
@@ -192,6 +210,11 @@ fn main() -> std::io::Result<()> {
                 }
                 times.sort_by(f64::total_cmp);
                 println!("repeated {} times: fastest {:.1} ms, middle {:.1} ms, slowest {:.1} ms", times.len(), times[0], times[times.len() / 2], times[times.len() - 1]);
+                #[cfg(feature = "gpu")]
+                if let Some(g) = &card {
+                    let (now, peak) = g.working();
+                    println!("card working memory: {} MB now, at most {} MB, budget {} MB", now >> 20, peak >> 20, g.work_budget() >> 20);
+                }
             }
             let t1 = Instant::now();
             let logits = predict_raw(&m, &mut w, &cache, &x[..n * cache.features], n, &opts, &st)?;
@@ -221,7 +244,23 @@ fn main() -> std::io::Result<()> {
             use browsertabicl::csv::{parse, Schema};
             use browsertabicl::table::{fit_classifier_with, ClassifierOpts};
             let target = flag(&args, "--target").expect("--target COLUMN");
-            let pos: Vec<&String> = { let mut skip = false; args[1..].iter().filter(|a| { if skip { skip = false; return false; } if a.starts_with("--") { skip = true; return false; } true }).collect() };
+            let pos: Vec<&String> = {
+                let mut skip = false;
+                args[1..]
+                    .iter()
+                    .filter(|a| {
+                        if skip {
+                            skip = false;
+                            return false;
+                        }
+                        if a.starts_with("--") {
+                            skip = true;
+                            return false;
+                        }
+                        true
+                    })
+                    .collect()
+            };
             let [weights, train, out] = pos[..] else { panic!("fit WEIGHTS train.csv --target COLUMN model.tirs") };
             let t0 = Instant::now();
             let m = Model::load(&Bundle::open(weights)?, Load::Fit)?;
@@ -236,7 +275,13 @@ fn main() -> std::io::Result<()> {
                     opts.n_estimators = v.parse().expect("--estimators N");
                 }
                 browsertabicl::table::fit_regressor_with(&m, &x, &y, n, h, out, &opts, &[("table/schema", schema.to_text().as_bytes())])?;
-                eprintln!("fitted regression on {n} rows, {h} features, {} ensemble members in {:.1} s; {out} is {:.0} MB; peak memory {:.0} MB", opts.n_estimators, t0.elapsed().as_secs_f64(), std::fs::metadata(out)?.len() as f64 / 1e6, rss_mb().0);
+                eprintln!(
+                    "fitted regression on {n} rows, {h} features, {} ensemble members in {:.1} s; {out} is {:.0} MB; peak memory {:.0} MB",
+                    opts.n_estimators,
+                    t0.elapsed().as_secs_f64(),
+                    std::fs::metadata(out)?.len() as f64 / 1e6,
+                    rss_mb().0
+                );
                 return Ok(());
             }
             let (schema, x, y) = Schema::learn(&table, &target)?;
@@ -251,7 +296,14 @@ fn main() -> std::io::Result<()> {
                 opts.fit.chunk = v.parse().expect("--chunk ROWS");
             }
             fit_classifier_with(&m, &x, &y, n, h, out, &opts, &[("table/schema", schema.to_text().as_bytes())])?;
-            eprintln!("fitted {n} rows, {h} features, {} classes, {} ensemble members in {:.1} s; {out} is {:.0} MB; peak memory {:.0} MB", schema.labels.len(), opts.n_estimators, t0.elapsed().as_secs_f64(), std::fs::metadata(out)?.len() as f64 / 1e6, rss_mb().0);
+            eprintln!(
+                "fitted {n} rows, {h} features, {} classes, {} ensemble members in {:.1} s; {out} is {:.0} MB; peak memory {:.0} MB",
+                schema.labels.len(),
+                opts.n_estimators,
+                t0.elapsed().as_secs_f64(),
+                std::fs::metadata(out)?.len() as f64 / 1e6,
+                rss_mb().0
+            );
         }
         Some("predict") => {
             use browsertabicl::csv::{parse, Schema};
@@ -326,7 +378,11 @@ fn main() -> std::io::Result<()> {
                 let mut sc = vec![0.0f32; len];
                 let mut out = vec![0.0f32; rows];
                 let (k, q, sc, out) = (&k[..], &q[..], &mut sc[..], &mut out[..]);
-                time(&format!("scores: weighted_sum {rows} rows x {len}"), (rows * len) as f64, &mut || with_simd!(|simd| [k: &'a [f32], q: &'a [f32], sc: &'a mut [f32]] -> () { weighted_sum(simd, q, k, sc) }));
+                time(
+                    &format!("scores: weighted_sum {rows} rows x {len}"),
+                    (rows * len) as f64,
+                    &mut || with_simd!(|simd| [k: &'a [f32], q: &'a [f32], sc: &'a mut [f32]] -> () { weighted_sum(simd, q, k, sc) }),
+                );
                 time(&format!("values: matvec {rows} x {len}"), (rows * len) as f64, &mut || with_simd!(|simd| [k: &'a [f32], sc: &'a [f32], out: &'a mut [f32]] -> () { matvec(simd, k, sc, out) }));
                 time(&format!("exp over {len}"), len as f64, &mut || with_simd!(|_simd| [sc: &'a mut [f32]] -> () { sc.iter_mut().for_each(|v| *v = -0.5); exp_shift_sum(sc, 0.0); }));
             }
@@ -377,31 +433,30 @@ fn main() -> std::io::Result<()> {
             eprintln!("wrote {} parts of at most {} MB and {}.json", listed.len(), max >> 20, args[2]);
         }
         Some("join") => {
-            // join PREFIX.json OUT: the inverse of split, checking the lengths
+            // join PREFIX.json OUT: the inverse of split, checking every part's length and the total
             let text = std::fs::read_to_string(&args[1])?;
             let dir = std::path::Path::new(&args[1]).parent().unwrap_or(std::path::Path::new("."));
-            let mut out = Vec::new();
-            for piece in text.split("\"file\": \"").skip(1) {
-                out.extend(std::fs::read(dir.join(piece.split('"').next().unwrap()))?);
-            }
-            let want = text.split("\"bytes\": ").nth(1).and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next()).and_then(|s| s.parse::<usize>().ok());
-            if want != Some(out.len()) {
-                return Err(std::io::Error::other(format!("the parts add up to {} bytes, the list says {want:?}", out.len())));
-            }
+            let out = browsertabicl::store::join_parts(&text, |name| std::fs::read(dir.join(name)))?;
             std::fs::write(&args[2], &out)?;
             eprintln!("wrote {}: {} bytes", args[2], out.len());
         }
         Some("keygen") => {
             let key = browsertabicl::crypt::new_key()?;
             let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
-            std::fs::write(&args[1], hex + "\n")?;
+            // readable by its owner only (where the platform has such permissions), and never over an existing key
+            let mut f = std::fs::File::options();
+            f.write(true).create_new(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut f, 0o600);
+            std::io::Write::write_all(&mut f.open(&args[1])?, (hex + "\n").as_bytes())?;
             eprintln!("wrote a new key to {}; keep it safe: without it a sealed model cannot be read", args[1]);
         }
         Some("seal") => {
             browsertabicl::crypt::seal_file(&args[1], &args[2], &browsertabicl::crypt::read_key(&args[3])?)?;
             eprintln!("sealed {} into {}", args[1], args[2]);
         }
-        _ => eprintln!("usage: browsertabicl convert|split|join|fit|predict|keygen|seal|bench-...   (see the top of src/bin/browsertabicl.rs)"),
+        None | Some("help" | "--help" | "-h") => eprintln!("{USAGE}"),
+        Some(other) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("unknown command '{other}'\n{USAGE}"))),
     }
     Ok(())
 }

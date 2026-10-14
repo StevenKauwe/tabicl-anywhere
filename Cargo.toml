@@ -4,6 +4,18 @@ version = "0.1.0"
 edition = "2021"
 description = "BrowserTabICL: an independent safe-Rust implementation of the TabICL v2 tabular model that fits, caches to disk and predicts by streaming the cache; runs natively and in the browser"
 license = "BSD-3-Clause"
+authors = ["Steven Kauwe"]
+repository = "https://github.com/StevenKauwe/browsertabicl"
+homepage = "https://stevenkauwe.github.io/browsertabicl/"
+documentation = "https://docs.rs/browsertabicl"
+readme = "README.md"
+keywords = ["tabular", "machine-learning", "tabicl", "wasm", "inference"]
+categories = ["science", "wasm", "algorithms"]
+# the graphics-card build needs 1.90 (wgpu's dependencies); checked in CI (.github/workflows/ci.yml, job msrv)
+rust-version = "1.90"
+# keep the published crate small: the web page, its 113 MB of weights, generated test data and tooling stay in
+# the repository only (the small committed test data in tests/data is kept, so `cargo test` works from the crate)
+exclude = ["/docs/", "/site/", "/fixtures/", "/ref/", "/report/", "/pkg/", "/target-web/", "/.github/", "/tools/*.mjs", "/tools/*.cjs", "/tools/__pycache__/"]
 
 [workspace]
 members = [".", "wasm"]
@@ -23,8 +35,6 @@ libm = "0.2"
 chacha20poly1305 = "0.10"
 getrandom = "0.2"
 web-time = "1"
-wgpu = { version = "30.0.1", optional = true }
-pollster = { version = "1.0.1", optional = true }
 
 [profile.release]
 opt-level = 3
@@ -35,10 +45,17 @@ debug = 1
 
 [dev-dependencies]
 bytemuck = { version = "1", features = ["extern_crate_alloc"] }
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
+# In a browser wgpu is a thin layer over the browser's own WebGPU: no driver code, no shader compiler.
+wgpu = { version = "30.0.1", optional = true, default-features = false, features = ["std", "webgpu", "wgsl", "fragile-send-sync-non-atomic-wasm"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wgpu = { version = "30.0.1", optional = true }
 
 [features]
-# Graphics-card acceleration (Vulkan, Metal, DirectX through wgpu). Off by default: the default build has no GPU code.
-gpu = ["dep:wgpu", "dep:pollster"]
+# Graphics-card acceleration (Vulkan, Metal, DirectX through wgpu; WebGPU in a browser). Off by default: the
+# default build has no GPU code.
+gpu = ["dep:wgpu"]

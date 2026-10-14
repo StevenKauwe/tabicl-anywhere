@@ -12,9 +12,22 @@ import * as app from "../site/app.js";
 import * as worker from "../site/worker.js";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
-const fx = (f) => path.join(root, "fixtures", f);
 const wasmPath = path.join(root, "site/pkg/browsertabicl_wasm_bg.wasm");
-const scratch = process.env.SCRATCH || path.join(root, process.env.CARGO_TARGET_DIR || "target");
+const scratch = process.env.SCRATCH || path.resolve(root, process.env.CARGO_TARGET_DIR || "target");
+fs.mkdirSync(scratch, { recursive: true });
+// Test data: the generated fixtures/ when present; otherwise the small committed copies in tests/data, and the
+// half-size weights joined from the web page's own parts in docs/weights (so this runs in CI too).
+const fx = (f) => {
+  for (const dir of ["fixtures", "tests/data"]) if (fs.existsSync(path.join(root, dir, f))) return path.join(root, dir, f);
+  const m = /^(classifier|regressor)-v2-half\.tirs$/.exec(f);
+  if (!m) return null;
+  const out = path.join(scratch, f);
+  if (!fs.existsSync(out)) {
+    const dir = path.join(root, "docs/weights"), list = JSON.parse(fs.readFileSync(path.join(dir, `${m[1]}-v2-half.json`), "utf8"));
+    fs.writeFileSync(out, Buffer.concat(list.parts.map((p) => fs.readFileSync(path.join(dir, p.file)))));
+  }
+  return out;
+};
 let failures = 0;
 const check = (ok, what) => { console.log(`${ok ? "ok  " : "FAIL"} ${what}`); if (!ok) failures++; };
 const worst = (a, b) => { let w = a.length === b.length ? 0 : Infinity; for (let i = 0; i < a.length; i++) w = Math.max(w, Math.abs(a[i] - b[i])); return w; };
@@ -53,7 +66,9 @@ const fileFetch = (cut) => async (url) => {
   if (cut && p.endsWith(cut)) body = body.subarray(0, body.length - 1000);
   return new Response(body, { headers: { "content-length": String(body.length) } });
 };
-const pageUrl = pathToFileURL(path.join(root, "site/index.html")).href;
+// the page fetches weights/ beside itself: site/weights after tools/build-site.sh, else the committed docs/ copy
+const pageDir = fs.existsSync(path.join(root, "site/weights/classifier-v2-half.json")) ? "site" : "docs";
+const pageUrl = pathToFileURL(path.join(root, pageDir, "index.html")).href;
 const weightBlobs = {};
 for (const kind of ["classifier", "regressor"]) {
   const src = app.weightsSource("weights/", kind, pageUrl);
@@ -114,7 +129,7 @@ check(await ask("describe", { text: "a,b\n1\n" }).then(() => false, (e) => /row 
   const { x } = await ask("features", { schema: entry.schema, text: fresh });
   const res = await app.predictModel(direct, store, { model: entry, weightsBlob: weightBlobs.classifier, x, rows: 25 });
   const pageCsv = app.resultsCsv(entry, res, 25);
-  const bin = path.join(root, process.env.CARGO_TARGET_DIR || "target", "release/browsertabicl");
+  const bin = path.resolve(root, process.env.CARGO_TARGET_DIR || "target", "release/browsertabicl");
   if (fs.existsSync(bin)) {
     const dir = fs.mkdtempSync(path.join(scratch, "site-test-"));
     fs.writeFileSync(path.join(dir, "train.csv"), train);
@@ -132,6 +147,7 @@ check(await ask("describe", { text: "a,b\n1\n" }).then(() => false, (e) => /row 
 
 // 3b. member-by-member through CSV, against the reference's probabilities (half weights, compact storage: what the page uses)
 for (const name of ["table-b", "table-a"]) {
+  if (!fx(name + ".tirs")) { console.log(`skip ${name} (fixtures/ not generated)`); continue; }
   const d = bundle(fx(name + ".tirs"));
   const rows = d.y_train.length, features = d.x_train.length / rows, n = d.x_test.length / features;
   const members = Object.keys(d).filter((k) => /^member\d+_method$/.test(k)).length;

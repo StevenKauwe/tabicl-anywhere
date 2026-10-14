@@ -8,6 +8,9 @@
 //! `fit` / `predict` (the two passes over an already-normalised table), `prep` (table preprocessing) and `table`
 //! (the everyday classifier interface that ties them together).
 #![forbid(unsafe_code)]
+// The numeric kernels index several arrays with one loop counter, and slice into fixed-width pieces with
+// `chunks_exact`: the clearest form for this arithmetic, and the one the compiler turns into vector code.
+#![allow(clippy::needless_range_loop, clippy::chunks_exact_to_as_chunks)]
 
 pub mod ckpt;
 pub mod crypt;

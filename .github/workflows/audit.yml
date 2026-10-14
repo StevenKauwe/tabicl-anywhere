@@ -1,0 +1,34 @@
+# Supply chain, weekly and whenever the dependencies change: known vulnerabilities, unmaintained or yanked
+# crates (cargo audit, cargo deny), and that every dependency's licence is one deny.toml allows.
+name: Dependencies
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  push:
+    paths: [Cargo.toml, Cargo.lock, wasm/Cargo.toml, deny.toml, .github/workflows/audit.yml]
+  pull_request:
+    paths: [Cargo.toml, Cargo.lock, wasm/Cargo.toml, deny.toml, .github/workflows/audit.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-audit
+      # the one known notice (RUSTSEC-2024-0436, `paste` unmaintained) is explained in deny.toml
+      - run: cargo audit --deny warnings --ignore RUSTSEC-2024-0436

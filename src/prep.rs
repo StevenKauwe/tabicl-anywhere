@@ -178,7 +178,15 @@ pub fn minimize_bounded(mut f: impl FnMut(f64) -> f64, mut a: f64, mut b: f64, x
     let mut xm = 0.5 * (a + b);
     let mut tol1 = sqrt_eps * xf.abs() + xtol / 3.0;
     let mut tol2 = 2.0 * tol1;
-    let sign = |v: f64| if v > 0.0 { 1.0 } else if v < 0.0 { -1.0 } else { 0.0 };
+    let sign = |v: f64| {
+        if v > 0.0 {
+            1.0
+        } else if v < 0.0 {
+            -1.0
+        } else {
+            0.0
+        }
+    };
     for _ in 0..500 {
         if (xf - xm).abs() <= tol2 - 0.5 * (b - a) {
             break;
@@ -380,7 +388,11 @@ impl Prep {
             let mut col: Vec<f64> = (0..n).map(|r| x[r * h + j]).collect();
             let seen: Vec<f64> = col.iter().copied().filter(|v| !v.is_nan()).collect();
             let fill = if seen.is_empty() { 0.0 } else { mean(&seen) };
-            col.iter_mut().for_each(|v| if v.is_nan() { *v = fill });
+            col.iter_mut().for_each(|v| {
+                if v.is_nan() {
+                    *v = fill
+                }
+            });
             p.impute.push(fill);
             if n <= 1 || col.iter().any(|v| *v != col[0]) {
                 p.keep.push(j);

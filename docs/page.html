@@ -119,6 +119,7 @@
      converted to half size in the browser. Not possible where the page may only fetch its own files. -->
 <main id="app" data-weights="weights/">
   <header>
+    <p class="lede"><a href="https://stevenkauwe.github.io/">← Steven Kauwe</a> · <a href="https://github.com/StevenKauwe/browsertabicl">Source</a></p>
     <h1>BrowserTabICL</h1>
     <p class="lede">Teach a model from a table of examples, then ask it about new rows. It all happens in this browser tab.</p>
     <p class="private">Your data never leaves this browser. The table you choose is read and worked on by your own computer; nothing is uploaded, and there is no server behind this page to receive it. The only thing fetched from the internet is the general-purpose model itself, which knows nothing about you. What you fit is stored in this browser only, until you delete it or its time runs out.</p>
@@ -203,6 +204,15 @@
               <option value="f32">Full precision (about twice the storage)</option>
             </select>
             <p class="note">Compact storage changes answers only in the fourth decimal place or beyond.</p>
+          </div>
+          <div class="field">
+            <label for="device">Where to work</label>
+            <select id="device" data-busy-off>
+              <option value="auto" selected>Whichever should be quicker (recommended)</option>
+              <option value="card">The graphics card</option>
+              <option value="processor">The processor</option>
+            </select>
+            <p class="note">Both give the same answers. The graphics card is used only where this browser offers one to web pages.</p>
           </div>
         </div>
       </details>

@@ -67,14 +67,7 @@ pub struct Ff2W<'a> {
 impl Block {
     pub fn query_w(&self) -> QueryW<'_> {
         let d = self.d;
-        QueryW {
-            heads: self.heads,
-            n1w: &self.n1w,
-            n1b: &self.n1b,
-            qw: &self.in_w[..d * d],
-            qb: &self.in_b[..d],
-            ss: self.ss.as_ref().map(|s| (&s.q0w[..], &s.q0b[..], &s.q2w[..], &s.q2b[..])),
-        }
+        QueryW { heads: self.heads, n1w: &self.n1w, n1b: &self.n1b, qw: &self.in_w[..d * d], qb: &self.in_b[..d], ss: self.ss.as_ref().map(|s| (&s.q0w[..], &s.q0b[..], &s.q2w[..], &s.q2b[..])) }
     }
     pub fn out_w(&self) -> OutW<'_> {
         OutW { w: &self.out_w, b: &self.out_b }
@@ -115,16 +108,7 @@ pub struct Ws {
 
 impl Ws {
     pub fn new(d: usize, heads: usize, ff: usize, max_keys: usize) -> Ws {
-        Ws {
-            t: vec![0.0; d],
-            q: vec![0.0; d],
-            h: vec![0.0; ff],
-            h64: vec![0.0; 64],
-            mm: vec![0.0; d / heads],
-            sc: vec![0.0; max_keys],
-            tmp: vec![0.0; d / heads],
-            soft: Soft::new(heads, d),
-        }
+        Ws { t: vec![0.0; d], q: vec![0.0; d], h: vec![0.0; ff], h64: vec![0.0; 64], mm: vec![0.0; d / heads], sc: vec![0.0; max_keys], tmp: vec![0.0; d / heads], soft: Soft::new(heads, d) }
     }
 }
 
@@ -450,4 +434,107 @@ pub fn calibrate(ms: f64) -> f64 {
     }
     std::hint::black_box(&y);
     (n * (o * i) as u64) as f64 / t.elapsed().as_secs_f64().max(1e-9)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn data(n: usize, seed: usize) -> Vec<f32> {
+        (0..n).map(|i| (((i + seed) * 7919 % 2003) as f32 - 1001.0) * 2e-3).collect()
+    }
+
+    /// Plain softmax attention for one query, per head, keys and values laid out `[d][r]`.
+    fn attend(q: &[f32], kt: &[f32], vt: &[f32], r: usize, heads: usize) -> Vec<f32> {
+        let d = q.len();
+        let hd = d / heads;
+        let mut out = vec![0.0f32; d];
+        for h in 0..heads {
+            let sc: Vec<f64> = (0..r).map(|j| (0..hd).map(|i| q[h * hd + i] as f64 * kt[(h * hd + i) * r + j] as f64).sum()).collect();
+            let top = sc.iter().copied().fold(f64::MIN, f64::max);
+            let w: Vec<f64> = sc.iter().map(|s| (s - top).exp()).collect();
+            let sum: f64 = w.iter().sum();
+            for i in 0..hd {
+                out[h * hd + i] = ((0..r).map(|j| w[j] * vt[(h * hd + i) * r + j] as f64).sum::<f64>() / sum) as f32;
+            }
+        }
+        out
+    }
+
+    /// The column of `kt` / `vt` (laid out `[d][r]`) for keys `a..b`, as its own `[d][b - a]` block.
+    fn cols(t: &[f32], d: usize, r: usize, a: usize, b: usize) -> Vec<f32> {
+        (0..d).flat_map(|i| t[i * r + a..i * r + b].iter().copied()).collect()
+    }
+
+    #[test]
+    fn streaming_softmax_matches_plain_attention_in_any_pieces() {
+        let (d, heads, r) = (16, 4, 37);
+        let (q, kt, vt) = (data(d, 1), data(d * r, 2), data(d * r, 3));
+        let want = attend(&q, &kt, &vt, r, heads);
+        let (mut sc, mut tmp) = (vec![0.0f32; r], vec![0.0f32; d / heads]);
+        for pieces in [vec![37], vec![1, 36], vec![10, 10, 10, 7], vec![36, 1]] {
+            let mut s = Soft::new(heads, d);
+            let mut at = 0;
+            for p in pieces {
+                let (k, v) = (cols(&kt, d, r, at, at + p), cols(&vt, d, r, at, at + p));
+                s.update(pulp::Scalar::new(), &q, &k, &v, p, &mut sc, &mut tmp);
+                at += p;
+            }
+            s.finish();
+            for (a, b) in s.acc.iter().zip(&want) {
+                assert!((a - b).abs() < 1e-5, "{a} {b}");
+            }
+        }
+        // two halves seen by separate accumulators, merged: the same again (and merging an empty one is a no-op)
+        let (mut a, mut b) = (Soft::new(heads, d), Soft::new(heads, d));
+        a.update(pulp::Scalar::new(), &q, &cols(&kt, d, r, 0, 20), &cols(&vt, d, r, 0, 20), 20, &mut sc, &mut tmp);
+        b.update(pulp::Scalar::new(), &q, &cols(&kt, d, r, 20, r), &cols(&vt, d, r, 20, r), r - 20, &mut sc, &mut tmp);
+        a.merge(&Soft::new(heads, d));
+        let mut empty = Soft::new(heads, d);
+        empty.merge(&b);
+        empty.merge(&a);
+        empty.finish();
+        for (x, y) in empty.acc.iter().zip(&want) {
+            assert!((x - y).abs() < 1e-5);
+        }
+        a.reset();
+        assert!(a.m.iter().all(|m| *m == f32::NEG_INFINITY) && a.s.iter().all(|s| *s == 0.0) && a.acc.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn integer_keys_and_values() {
+        let (d, heads, r) = (8, 2, 13);
+        let q = data(d, 4);
+        let ki: Vec<i16> = (0..d * r).map(|i| ((i * 31) % 601) as i16 - 300).collect();
+        let vi: Vec<i16> = (0..d * r).map(|i| ((i * 17) % 501) as i16 - 250).collect();
+        let (ks, vs): (Vec<f32>, Vec<f32>) = ((0..d).map(|j| 1e-3 * (j + 1) as f32).collect(), (0..d).map(|j| 2e-3 * (j + 2) as f32).collect());
+        // what the integers stand for
+        let kt: Vec<f32> = (0..d * r).map(|i| ki[i] as f32 * ks[i / r]).collect();
+        let vt: Vec<f32> = (0..d * r).map(|i| vi[i] as f32 * vs[i / r]).collect();
+        let want = attend(&q, &kt, &vt, r, heads);
+        let qs: Vec<f32> = q.iter().zip(&ks).map(|(a, b)| a * b).collect();
+        let (mut sc, mut tmp) = (vec![0.0f32; r], vec![0.0f32; d / heads]);
+        let mut s = Soft::new(heads, d);
+        s.update_int(pulp::Scalar::new(), &qs, &ki, &vi, &vs, r, &mut sc, &mut tmp);
+        s.finish();
+        let vf: Vec<f32> = vi.iter().map(|v| *v as f32).collect();
+        let mut s2 = Soft::new(heads, d);
+        s2.update_scaled(pulp::Scalar::new(), &q, &kt, &vf, Some(&vs), r, &mut sc, &mut tmp);
+        s2.finish();
+        for i in 0..d {
+            assert!((s.acc[i] - want[i]).abs() < 1e-4 && (s2.acc[i] - want[i]).abs() < 1e-4, "{i}: {} {} {}", s.acc[i], s2.acc[i], want[i]);
+        }
+    }
+
+    #[test]
+    fn small_pieces() {
+        let mut out = [0.0f32; 3];
+        group_values(&[1.0, 2.0, 3.0, 4.0, 5.0], 3, 3, &mut out);
+        assert_eq!(out, [5.0, 1.0, 3.0], "one, two and four places to the right, wrapping round");
+        let r = Rope::new(&[1.0, 0.5], 3);
+        assert_eq!(r.cos.len(), 6);
+        assert_eq!((r.cos[0], r.sin[0]), (1.0, 0.0), "position 0 does not rotate");
+        assert!((r.sin[2 * 2 + 1] - 1.0f32.sin()).abs() < 1e-7, "position 2, frequency 0.5");
+        assert!(calibrate(5.0) > 1e6, "even a slow machine does a million multiply-adds a second");
+    }
 }

@@ -4,11 +4,11 @@
 //! What gets written, per ensemble member (names carry the member's prefix):
 //!
 //! * `col_kv`    `[groups][digits][blocks][2][e][inducing]`: for every feature group and column block, the keys and
-//!               values of the inducing points after they have looked at that column's training cells.
+//!   values of the inducing points after they have looked at that column's training cells.
 //! * `tree`      the in-context problems (one, unless there are more classes than the model's native limit).
 //! * `n{j}_scale` `[layers][d]`: what a query is multiplied by in each in-context layer of problem `j`.
 //! * `n{j}_kv{l}` `[2 * rows * d]` in chunks of `chunk` rows, each chunk `[K: d][rows in chunk]` then `[V: ...]`:
-//!               keys and values of the training rows in in-context layer `l`.
+//!   keys and values of the training rows in in-context layer `l`.
 //!
 //! Memory while fitting: one column's cells per thread (`rows * e` floats) and the row representations
 //! (`rows * d` floats). The two large intermediates, the per-cell embeddings (`rows * groups * e`) and one layer's
@@ -256,7 +256,10 @@ impl Spill {
     }
     fn read(&self, at: usize, out: &mut [f32]) -> io::Result<()> {
         match self {
-            Spill::Mem(v) => Ok(out.copy_from_slice(&v[at..at + out.len()])),
+            Spill::Mem(v) => {
+                out.copy_from_slice(&v[at..at + out.len()]);
+                Ok(())
+            }
             Spill::Disk(f, _) => file_read_at(f, bytemuck::cast_slice_mut(out), 4 * at as u64),
         }
     }
@@ -323,98 +326,98 @@ pub async fn fit_raw_async(m: &Model, x: &[f32], y: &[f32], rows: usize, feature
     let col_one = |g: usize, src: &mut [f32]| -> io::Result<()> {
         let mut rec = vec![0.0f32; rec_len];
         {
-        let (rec, ind_q, a2_scale) = (&mut rec[..], &ind_q[..], &a2_scale[..]);
-        with_simd!(|simd| [m: &'a Model, x: &'a [f32], y: &'a [f32], g: usize, features: usize, chunk: usize, src: &'a mut [f32], rec: &'a mut [f32], ind_q: &'a [Vec<f32>], a2_scale: &'a [f32], bases: &'a [usize]] -> () {
-            let (e, inds) = (m.e, m.inds);
-            let rows = y.len();
-            let mut vals = [0.0f32; 8];
-            let vals = &mut vals[..m.group];
-            let digits = bases.len();
-            // with several label digits the column is embedded once per digit and the results averaged
-            let (mut plain, mut sum) = if digits > 1 { (vec![0.0f32; rows * e], vec![0.0f32; rows * e]) } else { (Vec::new(), Vec::new()) };
-            for r in 0..rows {
-                let cell = &mut src[r * e..(r + 1) * e];
-                group_values(&x[r * features..(r + 1) * features], g, m.group, vals);
-                if vals.iter().all(|v| *v == -100.0) {
-                    cell.fill(-100.0);
-                } else {
-                    linear(simd, &m.in_w, &m.in_b, vals, cell);
+            let (rec, ind_q, a2_scale) = (&mut rec[..], &ind_q[..], &a2_scale[..]);
+            with_simd!(|simd| [m: &'a Model, x: &'a [f32], y: &'a [f32], g: usize, features: usize, chunk: usize, src: &'a mut [f32], rec: &'a mut [f32], ind_q: &'a [Vec<f32>], a2_scale: &'a [f32], bases: &'a [usize]] -> () {
+                let (e, inds) = (m.e, m.inds);
+                let rows = y.len();
+                let mut vals = [0.0f32; 8];
+                let vals = &mut vals[..m.group];
+                let digits = bases.len();
+                // with several label digits the column is embedded once per digit and the results averaged
+                let (mut plain, mut sum) = if digits > 1 { (vec![0.0f32; rows * e], vec![0.0f32; rows * e]) } else { (Vec::new(), Vec::new()) };
+                for r in 0..rows {
+                    let cell = &mut src[r * e..(r + 1) * e];
+                    group_values(&x[r * features..(r + 1) * features], g, m.group, vals);
+                    if vals.iter().all(|v| *v == -100.0) {
+                        cell.fill(-100.0);
+                    } else {
+                        linear(simd, &m.in_w, &m.in_b, vals, cell);
+                    }
                 }
-            }
-            if digits > 1 {
-                plain.copy_from_slice(src);
-            }
-            let a1 = m.col[0].a1.as_ref().unwrap();
-            let mut ws = Ws::new(e, a1.heads, a1.ff, chunk.max(inds));
-            let mut softs: Vec<Soft> = (0..inds).map(|_| Soft::new(a1.heads, e)).collect();
-            let (mut kt, mut vt) = (vec![0.0f32; e * chunk], vec![0.0f32; e * chunk]);
-            let mut kv = vec![0.0f32; 2 * e];
-            let mut hidden = vec![0.0f32; inds * e];
-            for dg in 0..digits {
-            if dg > 0 {
-                src.copy_from_slice(&plain);
-            }
-            let divisor: usize = bases[dg + 1..].iter().product();
-            for r in 0..rows {
-                let yv = if digits > 1 { ((y[r] as usize / divisor) % bases[dg]) as f32 } else { y[r] };
-                m.add_y(&m.col_y, yv, &mut src[r * e..(r + 1) * e]);
-            }
-            let rec = &mut rec[dg * m.col.len() * 2 * e * inds..(dg + 1) * m.col.len() * 2 * e * inds];
-            for (bi, isab) in m.col.iter().enumerate() {
-                let a1 = isab.a1.as_ref().unwrap();
-                // inducing points look at this column's training cells, a chunk of rows at a time
-                softs.iter_mut().for_each(|s| s.reset());
-                for r0 in (0..rows).step_by(chunk) {
-                    let rc = chunk.min(rows - r0);
-                    for r in 0..rc {
-                        layer_norm(simd, &src[(r0 + r) * e..(r0 + r + 1) * e], &a1.n1w, &a1.n1b, &mut ws.t);
-                        linear(simd, &a1.in_w[e * e..], &a1.in_b[e..], &ws.t, &mut kv);
-                        for j in 0..e {
-                            kt[j * rc + r] = kv[j];
-                            vt[j * rc + r] = kv[e + j];
+                if digits > 1 {
+                    plain.copy_from_slice(src);
+                }
+                let a1 = m.col[0].a1.as_ref().unwrap();
+                let mut ws = Ws::new(e, a1.heads, a1.ff, chunk.max(inds));
+                let mut softs: Vec<Soft> = (0..inds).map(|_| Soft::new(a1.heads, e)).collect();
+                let (mut kt, mut vt) = (vec![0.0f32; e * chunk], vec![0.0f32; e * chunk]);
+                let mut kv = vec![0.0f32; 2 * e];
+                let mut hidden = vec![0.0f32; inds * e];
+                for dg in 0..digits {
+                if dg > 0 {
+                    src.copy_from_slice(&plain);
+                }
+                let divisor: usize = bases[dg + 1..].iter().product();
+                for r in 0..rows {
+                    let yv = if digits > 1 { ((y[r] as usize / divisor) % bases[dg]) as f32 } else { y[r] };
+                    m.add_y(&m.col_y, yv, &mut src[r * e..(r + 1) * e]);
+                }
+                let rec = &mut rec[dg * m.col.len() * 2 * e * inds..(dg + 1) * m.col.len() * 2 * e * inds];
+                for (bi, isab) in m.col.iter().enumerate() {
+                    let a1 = isab.a1.as_ref().unwrap();
+                    // inducing points look at this column's training cells, a chunk of rows at a time
+                    softs.iter_mut().for_each(|s| s.reset());
+                    for r0 in (0..rows).step_by(chunk) {
+                        let rc = chunk.min(rows - r0);
+                        for r in 0..rc {
+                            layer_norm(simd, &src[(r0 + r) * e..(r0 + r + 1) * e], &a1.n1w, &a1.n1b, &mut ws.t);
+                            linear(simd, &a1.in_w[e * e..], &a1.in_b[e..], &ws.t, &mut kv);
+                            for j in 0..e {
+                                kt[j * rc + r] = kv[j];
+                                vt[j * rc + r] = kv[e + j];
+                            }
+                        }
+                        for (i, s) in softs.iter_mut().enumerate() {
+                            s.update(simd, &ind_q[bi][i * e..(i + 1) * e], &kt[..e * rc], &vt[..e * rc], rc, &mut ws.sc, &mut ws.tmp);
                         }
                     }
                     for (i, s) in softs.iter_mut().enumerate() {
-                        s.update(simd, &ind_q[bi][i * e..(i + 1) * e], &kt[..e * rc], &vt[..e * rc], rc, &mut ws.sc, &mut ws.tmp);
+                        s.finish();
+                        let hid = &mut hidden[i * e..(i + 1) * e];
+                        linear(simd, &a1.out_w, &a1.out_b, &s.acc, hid);
+                        for j in 0..e {
+                            hid[j] += isab.ind[i * e + j];
+                        }
+                        feed_forward(simd, a1.ff1_w(), a1.ff2_w(), hid, &mut ws.t, &mut ws.h);
+                    }
+                    // their keys and values for the second attention: this is what prediction reuses
+                    let a2 = &isab.a2;
+                    let (rk, rv) = rec[bi * 2 * e * inds..(bi + 1) * 2 * e * inds].split_at_mut(e * inds);
+                    for i in 0..inds {
+                        layer_norm(simd, &hidden[i * e..(i + 1) * e], &a2.n1w, &a2.n1b, &mut ws.t);
+                        linear(simd, &a2.in_w[e * e..], &a2.in_b[e..], &ws.t, &mut kv);
+                        for j in 0..e {
+                            rk[j * inds + i] = kv[j];
+                            rv[j * inds + i] = kv[e + j];
+                        }
+                    }
+                    for cell in src.chunks_exact_mut(e) {
+                        cached_block(simd, a2, a2_scale, rk, rv, inds, cell, &mut ws);
                     }
                 }
-                for (i, s) in softs.iter_mut().enumerate() {
-                    s.finish();
-                    let hid = &mut hidden[i * e..(i + 1) * e];
-                    linear(simd, &a1.out_w, &a1.out_b, &s.acc, hid);
-                    for j in 0..e {
-                        hid[j] += isab.ind[i * e + j];
-                    }
-                    feed_forward(simd, a1.ff1_w(), a1.ff2_w(), hid, &mut ws.t, &mut ws.h);
-                }
-                // their keys and values for the second attention: this is what prediction reuses
-                let a2 = &isab.a2;
-                let (rk, rv) = rec[bi * 2 * e * inds..(bi + 1) * 2 * e * inds].split_at_mut(e * inds);
-                for i in 0..inds {
-                    layer_norm(simd, &hidden[i * e..(i + 1) * e], &a2.n1w, &a2.n1b, &mut ws.t);
-                    linear(simd, &a2.in_w[e * e..], &a2.in_b[e..], &ws.t, &mut kv);
-                    for j in 0..e {
-                        rk[j * inds + i] = kv[j];
-                        rv[j * inds + i] = kv[e + j];
+                if digits > 1 {
+                    for (a, b) in sum.iter_mut().zip(src.iter()) {
+                        *a += *b;
                     }
                 }
-                for cell in src.chunks_exact_mut(e) {
-                    cached_block(simd, a2, a2_scale, rk, rv, inds, cell, &mut ws);
                 }
-            }
-            if digits > 1 {
-                for (a, b) in sum.iter_mut().zip(src.iter()) {
-                    *a += *b;
+                if digits > 1 {
+                    let inv = 1.0 / digits as f32;
+                    for (a, b) in src.iter_mut().zip(&sum) {
+                        *a = *b * inv;
+                    }
                 }
-            }
-            }
-            if digits > 1 {
-                let inv = 1.0 / digits as f32;
-                for (a, b) in src.iter_mut().zip(&sum) {
-                    *a = *b * inv;
-                }
-            }
-        });
+            });
         }
         out.write_f32_at(&col_name, g * rec_len, &rec)
     };
@@ -462,19 +465,19 @@ pub async fn fit_raw_async(m: &Model, x: &[f32], y: &[f32], rows: usize, feature
             }
         }
     } else {
-    match &mut spill {
-        Spill::Mem(v) => v.par_chunks_mut(rows * e).enumerate().try_for_each(|(g, src)| col_one(g, src))?,
-        Spill::Disk(..) => {
-            let sp = &spill;
-            (0..features).into_par_iter().try_for_each_init(
-                || vec![0.0f32; rows * e],
-                |src, g| {
-                    col_one(g, src)?;
-                    sp.write(g * rows * e, src)
-                },
-            )?
+        match &mut spill {
+            Spill::Mem(v) => v.par_chunks_mut(rows * e).enumerate().try_for_each(|(g, src)| col_one(g, src))?,
+            Spill::Disk(..) => {
+                let sp = &spill;
+                (0..features).into_par_iter().try_for_each_init(
+                    || vec![0.0f32; rows * e],
+                    |src, g| {
+                        col_one(g, src)?;
+                        sp.write(g * rows * e, src)
+                    },
+                )?
+            }
         }
-    }
     }
 
     if trace {
@@ -510,30 +513,30 @@ pub async fn fit_raw_async(m: &Model, x: &[f32], y: &[f32], rows: usize, feature
             acc.rows(m, &cells, n, reps).await?;
         }
     } else {
-    let row_chunk = 64;
-    reps_all.par_chunks_mut(row_chunk * d).enumerate().try_for_each_init(
-        || (RowWs::new(m, tokens), vec![0.0f32; tokens * e], vec![0.0f32; row_chunk * features * e]),
-        |(ws, tok, buf), (ci, reps)| -> io::Result<()> {
-            let r0 = ci * row_chunk;
-            let rc = reps.len() / d;
-            for g in 0..features {
-                spill.read(g * rows * e + r0 * e, &mut buf[g * rc * e..(g + 1) * rc * e])?;
-            }
-            with_simd!(|simd| [m: &'a Model, rope: &'a Rope, ws: &'a mut RowWs, tok: &'a mut [f32], buf: &'a [f32], reps: &'a mut [f32], rc: usize, tokens: usize] -> () {
-                let (e, d) = (m.e, m.d);
-                let features = tokens - m.cls;
-                for r in 0..rc {
-                    tok[..m.cls * e].copy_from_slice(&m.cls_tokens);
-                    for g in 0..features {
-                        tok[(m.cls + g) * e..(m.cls + g + 1) * e].copy_from_slice(&buf[(g * rc + r) * e..(g * rc + r + 1) * e]);
-                    }
-                    let rep = &mut reps[r * d..(r + 1) * d];
-                    row_forward(simd, m, rope, tok, tokens, ws, rep);
+        let row_chunk = 64;
+        reps_all.par_chunks_mut(row_chunk * d).enumerate().try_for_each_init(
+            || (RowWs::new(m, tokens), vec![0.0f32; tokens * e], vec![0.0f32; row_chunk * features * e]),
+            |(ws, tok, buf), (ci, reps)| -> io::Result<()> {
+                let r0 = ci * row_chunk;
+                let rc = reps.len() / d;
+                for g in 0..features {
+                    spill.read(g * rows * e + r0 * e, &mut buf[g * rc * e..(g + 1) * rc * e])?;
                 }
-            });
-            Ok(())
-        },
-    )?;
+                with_simd!(|simd| [m: &'a Model, rope: &'a Rope, ws: &'a mut RowWs, tok: &'a mut [f32], buf: &'a [f32], reps: &'a mut [f32], rc: usize, tokens: usize] -> () {
+                    let (e, d) = (m.e, m.d);
+                    let features = tokens - m.cls;
+                    for r in 0..rc {
+                        tok[..m.cls * e].copy_from_slice(&m.cls_tokens);
+                        for g in 0..features {
+                            tok[(m.cls + g) * e..(m.cls + g + 1) * e].copy_from_slice(&buf[(g * rc + r) * e..(g * rc + r + 1) * e]);
+                        }
+                        let rep = &mut reps[r * d..(r + 1) * d];
+                        row_forward(simd, m, rope, tok, tokens, ws, rep);
+                    }
+                });
+                Ok(())
+            },
+        )?;
     }
     drop(spill);
 
@@ -572,137 +575,137 @@ pub async fn fit_raw_async(m: &Model, x: &[f32], y: &[f32], rows: usize, feature
         rec
     };
     for (ni, node) in plan.nodes.iter().enumerate() {
-    let rows = node.rows.as_ref().map_or(all_rows, |r| r.len());
-    let mut hcur = match &node.rows {
-        None => std::mem::take(&mut reps_all),
-        Some(r) => r.iter().flat_map(|src| reps_all[src * d..(src + 1) * d].iter().copied()).collect(),
-    };
-    for (h, y) in hcur.chunks_exact_mut(d).zip(&node.y) {
-        m.add_y(&m.icl_y, *y, h);
-    }
-    // One layer's keys and values for every row: held in memory if that fits the budget, otherwise read back,
-    // a chunk at a time, from where they were just written.
-    let in_mem = 2 * rows * d * 4 <= opts.mem_budget;
-    let mut kv = vec![0.0f32; if in_mem { 2 * rows * d } else { 0 }];
-    let side = if in_mem || opts.kv == Kv::F32 {
-        None
-    } else {
-        // integer storage and too big for memory: keep an exact copy of the layer in a scratch file
-        let p = opts.scratch.clone().unwrap_or_else(std::env::temp_dir).join(format!("BrowserTabICL-kv-{}-{}.tmp", std::process::id(), prefix.replace('/', "_")));
-        let f = File::options().read(true).write(true).create(true).truncate(true).open(&p)?;
-        f.set_len(8 * (rows * d) as u64)?;
-        Some(Spill::Disk(f, p))
-    };
-    let full = opts.kv.record(d, chunk);
-    let mut scales = vec![0.0f32; m.icl_layers * d];
-    if let Some(acc) = &opts.accel.0 {
-        for (l, b) in m.icl.iter().enumerate() {
-            scales[l * d..(l + 1) * d].copy_from_slice(&b.query_scale(rows));
-        }
-        // the accelerator runs the layers; each layer's keys and values come back row by row and are stored
-        // here in chunks, coordinate by coordinate
-        let mut store = |l: usize, k: &[f32], v: &[f32]| -> io::Result<()> {
-            let name = format!("{prefix}n{ni}_kv{l}");
-            k.par_chunks(chunk * d).zip(v.par_chunks(chunk * d)).enumerate().try_for_each(|(ci, (kc, vc))| {
-                let rc = kc.len() / d;
-                let mut kvc = vec![0.0f32; 2 * d * rc];
-                let (kt, vt) = kvc.split_at_mut(d * rc);
-                for r in 0..rc {
-                    for j in 0..d {
-                        kt[j * rc + r] = kc[r * d + j];
-                        vt[j * rc + r] = vc[r * d + j];
-                    }
-                }
-                out.write_bytes_at(&name, ci * full, &pack(&kvc))
-            })
+        let rows = node.rows.as_ref().map_or(all_rows, |r| r.len());
+        let mut hcur = match &node.rows {
+            None => std::mem::take(&mut reps_all),
+            Some(r) => r.iter().flat_map(|src| reps_all[src * d..(src + 1) * d].iter().copied()).collect(),
         };
-        if acc.in_context(m, &hcur, rows, &scales, &mut store).await? {
-            out.write_f32_at(&format!("{prefix}n{ni}_scale"), 0, &scales)?;
-            continue;
+        for (h, y) in hcur.chunks_exact_mut(d).zip(&node.y) {
+            m.add_y(&m.icl_y, *y, h);
         }
-    }
-    for (l, b) in m.icl.iter().enumerate() {
-        let scale = b.query_scale(rows);
-        scales[l * d..(l + 1) * d].copy_from_slice(&scale);
-        let scale = &scale[..];
-        let name = format!("{prefix}n{ni}_kv{l}");
-        // keys and values of every training row, chunk by chunk
-        let fill = |ws: &mut Ws, two: &mut [f32], kvc: &mut [f32], hc: &[f32]| {
-            with_simd!(|simd| [b: &'a crate::model::Block, ws: &'a mut Ws, two: &'a mut [f32], kvc: &'a mut [f32], hc: &'a [f32]] -> () {
-                let d = b.d;
-                let rc = hc.len() / d;
-                let (kt, vt) = kvc.split_at_mut(d * rc);
-                for r in 0..rc {
-                    layer_norm(simd, &hc[r * d..(r + 1) * d], &b.n1w, &b.n1b, &mut ws.t);
-                    linear(simd, &b.in_w[d * d..], &b.in_b[d..], &ws.t, two);
-                    for j in 0..d {
-                        kt[j * rc + r] = two[j];
-                        vt[j * rc + r] = two[d + j];
-                    }
-                }
-            });
-        };
-        let new = || (Ws::new(d, b.heads, b.ff, 1), vec![0.0f32; 2 * d], vec![0.0f32; if in_mem { 0 } else { 2 * d * chunk }]);
-        if in_mem {
-            kv.par_chunks_mut(2 * d * chunk).zip(hcur.par_chunks(chunk * d)).enumerate().try_for_each_init(new, |(ws, two, _), (ci, (kvc, hc))| {
-                fill(ws, two, kvc, hc);
-                out.write_bytes_at(&name, ci * full, &pack(kvc))
-            })?;
+        // One layer's keys and values for every row: held in memory if that fits the budget, otherwise read back,
+        // a chunk at a time, from where they were just written.
+        let in_mem = 2 * rows * d * 4 <= opts.mem_budget;
+        let mut kv = vec![0.0f32; if in_mem { 2 * rows * d } else { 0 }];
+        let side = if in_mem || opts.kv == Kv::F32 {
+            None
         } else {
-            hcur.par_chunks(chunk * d).enumerate().try_for_each_init(new, |(ws, two, buf), (ci, hc)| {
-                let kvc = &mut buf[..2 * hc.len()];
-                fill(ws, two, kvc, hc);
-                if let Some(sp) = &side {
-                    sp.write(ci * 2 * d * chunk, kvc)?;
-                }
-                out.write_bytes_at(&name, ci * full, &pack(kvc))
-            })?;
-        }
-        if l + 1 == m.icl.len() {
-            break; // the training rows' own outputs of the last layer are never used
-        }
-        if let (Some(acc), true) = (&opts.accel.0, in_mem && opts.accel.0.as_ref().is_some_and(|a| a.attend_fits(rows, d))) {
-            // the accelerator does the attention for all rows at once; the CPU does the rest of the block
-            let mut q = vec![0.0f32; rows * d];
-            q.par_chunks_mut(d).zip(hcur.par_chunks(d)).for_each_init(
-                || Ws::new(d, b.heads, b.ff, 1),
-                |ws, (qr, hr)| {
-                    with_simd!(|simd| [b: &'a crate::model::Block, scale: &'a [f32], ws: &'a mut Ws, qr: &'a mut [f32], hr: &'a [f32]] -> () {
-                        query(simd, b.query_w(), scale, hr, &mut ws.t, &mut ws.h64, &mut ws.mm, qr)
-                    });
-                },
-            );
-            if trace {
-                eprintln!("fit: layer {l} queries ready at {:.2} s", clock.elapsed().as_secs_f64());
-            }
-            let t = web_time::Instant::now();
-            let att = acc.attend(&q, &kv, rows, chunk, d, b.heads).await?;
-            if trace {
-                eprintln!("fit: layer {l} attention on the accelerator took {:.2} s", t.elapsed().as_secs_f64());
-            }
-            hcur.par_chunks_mut(d).zip(att.par_chunks(d)).for_each_init(
-                || Ws::new(d, b.heads, b.ff, 1),
-                |ws, (x, a)| {
-                    with_simd!(|simd| [b: &'a crate::model::Block, ws: &'a mut Ws, x: &'a mut [f32], a: &'a [f32]] -> () {
-                        linear(simd, &b.out_w, &b.out_b, a, &mut ws.t);
-                        for j in 0..x.len() {
-                            x[j] += ws.t[j];
-                        }
-                        feed_forward(simd, b.ff1_w(), b.ff2_w(), x, &mut ws.t, &mut ws.h);
-                    });
-                },
-            );
-            continue;
-        }
-        // every training row attends to all training rows; a batch of queries shares each chunk while it is hot
-        let qb = 32;
-        let kv = &kv[..];
-        let (back, base): (Option<&dyn ReadAt>, u64) = match &side {
-            _ if in_mem => (None, 0),
-            Some(Spill::Disk(f, _)) => (Some(f), 0),
-            _ => (Some(&*out.file), out.entry(&name).offset),
+            // integer storage and too big for memory: keep an exact copy of the layer in a scratch file
+            let p = opts.scratch.clone().unwrap_or_else(std::env::temp_dir).join(format!("BrowserTabICL-kv-{}-{}.tmp", std::process::id(), prefix.replace('/', "_")));
+            let f = File::options().read(true).write(true).create(true).truncate(true).open(&p)?;
+            f.set_len(8 * (rows * d) as u64)?;
+            Some(Spill::Disk(f, p))
         };
-        hcur.par_chunks_mut(qb * d).try_for_each_init(
+        let full = opts.kv.record(d, chunk);
+        let mut scales = vec![0.0f32; m.icl_layers * d];
+        if let Some(acc) = &opts.accel.0 {
+            for (l, b) in m.icl.iter().enumerate() {
+                scales[l * d..(l + 1) * d].copy_from_slice(&b.query_scale(rows));
+            }
+            // the accelerator runs the layers; each layer's keys and values come back row by row and are stored
+            // here in chunks, coordinate by coordinate
+            let mut store = |l: usize, k: &[f32], v: &[f32]| -> io::Result<()> {
+                let name = format!("{prefix}n{ni}_kv{l}");
+                k.par_chunks(chunk * d).zip(v.par_chunks(chunk * d)).enumerate().try_for_each(|(ci, (kc, vc))| {
+                    let rc = kc.len() / d;
+                    let mut kvc = vec![0.0f32; 2 * d * rc];
+                    let (kt, vt) = kvc.split_at_mut(d * rc);
+                    for r in 0..rc {
+                        for j in 0..d {
+                            kt[j * rc + r] = kc[r * d + j];
+                            vt[j * rc + r] = vc[r * d + j];
+                        }
+                    }
+                    out.write_bytes_at(&name, ci * full, &pack(&kvc))
+                })
+            };
+            if acc.in_context(m, &hcur, rows, &scales, &mut store).await? {
+                out.write_f32_at(&format!("{prefix}n{ni}_scale"), 0, &scales)?;
+                continue;
+            }
+        }
+        for (l, b) in m.icl.iter().enumerate() {
+            let scale = b.query_scale(rows);
+            scales[l * d..(l + 1) * d].copy_from_slice(&scale);
+            let scale = &scale[..];
+            let name = format!("{prefix}n{ni}_kv{l}");
+            // keys and values of every training row, chunk by chunk
+            let fill = |ws: &mut Ws, two: &mut [f32], kvc: &mut [f32], hc: &[f32]| {
+                with_simd!(|simd| [b: &'a crate::model::Block, ws: &'a mut Ws, two: &'a mut [f32], kvc: &'a mut [f32], hc: &'a [f32]] -> () {
+                    let d = b.d;
+                    let rc = hc.len() / d;
+                    let (kt, vt) = kvc.split_at_mut(d * rc);
+                    for r in 0..rc {
+                        layer_norm(simd, &hc[r * d..(r + 1) * d], &b.n1w, &b.n1b, &mut ws.t);
+                        linear(simd, &b.in_w[d * d..], &b.in_b[d..], &ws.t, two);
+                        for j in 0..d {
+                            kt[j * rc + r] = two[j];
+                            vt[j * rc + r] = two[d + j];
+                        }
+                    }
+                });
+            };
+            let new = || (Ws::new(d, b.heads, b.ff, 1), vec![0.0f32; 2 * d], vec![0.0f32; if in_mem { 0 } else { 2 * d * chunk }]);
+            if in_mem {
+                kv.par_chunks_mut(2 * d * chunk).zip(hcur.par_chunks(chunk * d)).enumerate().try_for_each_init(new, |(ws, two, _), (ci, (kvc, hc))| {
+                    fill(ws, two, kvc, hc);
+                    out.write_bytes_at(&name, ci * full, &pack(kvc))
+                })?;
+            } else {
+                hcur.par_chunks(chunk * d).enumerate().try_for_each_init(new, |(ws, two, buf), (ci, hc)| {
+                    let kvc = &mut buf[..2 * hc.len()];
+                    fill(ws, two, kvc, hc);
+                    if let Some(sp) = &side {
+                        sp.write(ci * 2 * d * chunk, kvc)?;
+                    }
+                    out.write_bytes_at(&name, ci * full, &pack(kvc))
+                })?;
+            }
+            if l + 1 == m.icl.len() {
+                break; // the training rows' own outputs of the last layer are never used
+            }
+            if let (Some(acc), true) = (&opts.accel.0, in_mem && opts.accel.0.as_ref().is_some_and(|a| a.attend_fits(rows, d))) {
+                // the accelerator does the attention for all rows at once; the CPU does the rest of the block
+                let mut q = vec![0.0f32; rows * d];
+                q.par_chunks_mut(d).zip(hcur.par_chunks(d)).for_each_init(
+                    || Ws::new(d, b.heads, b.ff, 1),
+                    |ws, (qr, hr)| {
+                        with_simd!(|simd| [b: &'a crate::model::Block, scale: &'a [f32], ws: &'a mut Ws, qr: &'a mut [f32], hr: &'a [f32]] -> () {
+                            query(simd, b.query_w(), scale, hr, &mut ws.t, &mut ws.h64, &mut ws.mm, qr)
+                        });
+                    },
+                );
+                if trace {
+                    eprintln!("fit: layer {l} queries ready at {:.2} s", clock.elapsed().as_secs_f64());
+                }
+                let t = web_time::Instant::now();
+                let att = acc.attend(&q, &kv, rows, chunk, d, b.heads).await?;
+                if trace {
+                    eprintln!("fit: layer {l} attention on the accelerator took {:.2} s", t.elapsed().as_secs_f64());
+                }
+                hcur.par_chunks_mut(d).zip(att.par_chunks(d)).for_each_init(
+                    || Ws::new(d, b.heads, b.ff, 1),
+                    |ws, (x, a)| {
+                        with_simd!(|simd| [b: &'a crate::model::Block, ws: &'a mut Ws, x: &'a mut [f32], a: &'a [f32]] -> () {
+                            linear(simd, &b.out_w, &b.out_b, a, &mut ws.t);
+                            for j in 0..x.len() {
+                                x[j] += ws.t[j];
+                            }
+                            feed_forward(simd, b.ff1_w(), b.ff2_w(), x, &mut ws.t, &mut ws.h);
+                        });
+                    },
+                );
+                continue;
+            }
+            // every training row attends to all training rows; a batch of queries shares each chunk while it is hot
+            let qb = 32;
+            let kv = &kv[..];
+            let (back, base): (Option<&dyn ReadAt>, u64) = match &side {
+                _ if in_mem => (None, 0),
+                Some(Spill::Disk(f, _)) => (Some(f), 0),
+                _ => (Some(&*out.file), out.entry(&name).offset),
+            };
+            hcur.par_chunks_mut(qb * d).try_for_each_init(
             || (Ws::new(d, b.heads, b.ff, chunk), (0..qb).map(|_| Soft::new(b.heads, d)).collect::<Vec<_>>(), vec![0.0f32; qb * d], vec![0.0f32; if in_mem { 0 } else { 2 * d * chunk }]),
             |(ws, softs, qc, buf), hc| -> io::Result<()> {
                 with_simd!(|simd| [b: &'a crate::model::Block, scale: &'a [f32], kv: &'a [f32], back: Option<&'a dyn ReadAt>, base: u64, rows: usize, chunk: usize, ws: &'a mut Ws, softs: &'a mut [Soft], hc: &'a mut [f32], qc: &'a mut [f32], buf: &'a mut [f32]] -> io::Result<()> {
@@ -739,8 +742,8 @@ pub async fn fit_raw_async(m: &Model, x: &[f32], y: &[f32], rows: usize, feature
                 })
             },
         )?;
-    }
-    out.write_f32_at(&format!("{prefix}n{ni}_scale"), 0, &scales)?;
+        }
+        out.write_f32_at(&format!("{prefix}n{ni}_scale"), 0, &scales)?;
     }
     if trace {
         eprintln!("fit: in-context stage done at {:.2} s", clock.elapsed().as_secs_f64());

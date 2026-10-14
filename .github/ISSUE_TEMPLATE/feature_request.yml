@@ -1,0 +1,21 @@
+name: Feature request
+description: Something BrowserTabICL should do that it does not
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What you want to do
+      description: The task you are trying to get done, not only the feature you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How it could work
+      description: Optional. Commands, an interface, or what the reference implementation does.
+  - type: textarea
+    id: else
+    attributes:
+      label: Anything else
+      description: Alternatives you tried, sizes of the tables involved, speed or memory limits.

@@ -4,10 +4,16 @@ version = "0.1.0"
 edition = "2021"
 description = "JavaScript bindings for BrowserTabICL (the generated glue needs unsafe code, so it lives apart from the safe core)"
 license = "BSD-3-Clause"
+repository = "https://github.com/StevenKauwe/browsertabicl"
+rust-version = "1.90"
+# built and shipped as the web page's engine (tools/build-wasm.sh), not published to crates.io
+publish = false
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-browsertabicl = { path = ".." }
+browsertabicl = { path = "..", features = ["gpu"] }
 wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"

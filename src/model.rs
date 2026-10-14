@@ -157,7 +157,7 @@ pub enum Load {
 fn cfg_value<'a>(cfg: &'a str, key: &str) -> Option<&'a str> {
     let at = cfg.find(&format!("\"{key}\""))?;
     let rest = cfg[at..].split_once(':')?.1;
-    Some(rest.split(|c| c == ',' || c == '}').next()?.trim().trim_matches('"'))
+    Some(rest.split([',', '}']).next()?.trim().trim_matches('"'))
 }
 
 /// `[out][classes]` weight and `[out]` bias of a one-hot linear layer, turned into one embedding row per class.
@@ -217,9 +217,7 @@ impl Model {
                 return Err(bad(format!("unsupported checkpoint: {k} is {got}, this crate implements {v}")));
             }
         }
-        let num = |k: &str| -> io::Result<usize> {
-            cfg_value(&cfg, k).and_then(|v| v.parse().ok()).ok_or_else(|| bad(format!("config has no number {k}")))
-        };
+        let num = |k: &str| -> io::Result<usize> { cfg_value(&cfg, k).and_then(|v| v.parse().ok()).ok_or_else(|| bad(format!("config has no number {k}"))) };
         let (max_classes, cls) = (num("max_classes")?, num("row_num_cls")?);
         let (col_heads, row_heads, icl_heads) = (num("col_nhead")?, num("row_nhead")?, num("icl_nhead")?);
         let in_b = bundle.f32s("col_embedder.in_linear.bias")?;
@@ -234,16 +232,12 @@ impl Model {
                 ind: if fit { bundle.f32s(&format!("{p}.ind_vectors"))? } else { Vec::new() },
             });
         }
-        let row = (0..num("row_num_blocks")?)
-            .map(|i| Block::load(bundle, &format!("row_interactor.tf_row.blocks.{i}"), row_heads, false))
-            .collect::<io::Result<Vec<_>>>()?;
+        let row = (0..num("row_num_blocks")?).map(|i| Block::load(bundle, &format!("row_interactor.tf_row.blocks.{i}"), row_heads, false)).collect::<io::Result<Vec<_>>>()?;
         let icl_layers = num("icl_num_blocks")?;
         let icl = if how == Load::PredictStreamed {
             Vec::new()
         } else {
-            (0..icl_layers)
-                .map(|i| Block::load(bundle, &format!("icl_predictor.tf_icl.blocks.{i}"), icl_heads, !fit))
-                .collect::<io::Result<Vec<_>>>()?
+            (0..icl_layers).map(|i| Block::load(bundle, &format!("icl_predictor.tf_icl.blocks.{i}"), icl_heads, !fit)).collect::<io::Result<Vec<_>>>()?
         };
         let lnw = bundle.f32s("icl_predictor.ln.weight")?;
         Ok(Model {

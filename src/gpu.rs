@@ -1,9 +1,10 @@
 //! Optional graphics-card acceleration (`--features gpu`), through wgpu: Vulkan on Linux, Metal on macOS,
-//! DirectX on Windows.
+//! DirectX on Windows, and the browser's own WebGPU when built for the web.
 //!
-//! Prediction runs all three stages on the card in one submission, against a fitted model held in graphics
-//! memory (`VramModel`, 16 bits per number). Fitting runs its three stages there too, a batch of columns, of
-//! rows, or a layer at a time (`impl Attend for Gpu`); the cache written is in the same format as the CPU's.
+//! Prediction runs all three stages on the card, against a fitted model held in graphics memory (`VramModel`,
+//! 16 bits per number, kept by a `VramTier` with per-tenant budgets). Fitting runs its three stages there too,
+//! a batch of columns, of rows, or a layer at a time (`impl Attend for Gpu`); the cache written is in the same
+//! format as the CPU's.
 //!
 //! The shaders are plain WGSL with no optional features. What makes them quick is the same on any card:
 //!
@@ -13,6 +14,30 @@
 //! * running sums live in plainly named variables, which drivers keep in registers, never in arrays walked by
 //!   a loop, which they do not;
 //! * nothing large is written to graphics memory between passes, and working buffers are reused across calls.
+//!
+//! Waiting for the card, natively and in a browser. A browser lets nothing stop and wait for the card: finding
+//! it and reading results back only ever complete later, when the code that asked has handed control back. So
+//! every function here that needs a result from the card is `async`, and the waiting happens in exactly one
+//! place, `Gpu::take`: natively it stops right there until the submission is through (`device.poll`), so the
+//! future is finished the first time it is asked and costs nothing; in a browser it hands control back until the
+//! browser calls with the result. Recording and submitting work never waits, in either. The loops that call the
+//! card (`fit::fit_raw_async`, `predict::predict_raw_async`, and through them `table`) are `async` in the same
+//! way, and their plain, blocking forms are `wait::block_on` of them; so there is one copy of the maths and of
+//! the loops, and the native interface is what it was. The few cases where native code used a second thread
+//! (loading a model into the tier in the background, overlapping the card with packing results in fitting)
+//! are, respectively, done in line in a browser, and done by handing the card the next layer before waiting for
+//! the last one, which needs no thread anywhere.
+//!
+//! Graphics memory, at worst, for one `Gpu` and one `VramTier`:
+//!
+//!   the tier's budget (fitted models; `VramTier::new`)
+//!   + the working-memory budget (`Gpu::set_work_budget`, `WORK_BUDGET` = 1.5 GB unless set; see `Pool`)
+//!   + the weights in use: about 80 MB per model kind (`GpuWeights::bytes`; shared, not charged to tenants)
+//!   + a few kilobytes of parameter blocks and the shaders.
+//!
+//! Prediction cuts batches too large for the working-memory budget into sub-batches of rows; fitting sizes its
+//! batches to it, and leaves to the CPU what does not fit even one at a time. `Gpu::release` gives back the idle
+//! working buffers and the cached fitting weights; `VramTier::evict` the fitted models.
 
 use crate::fit::Attend;
 use crate::model::Model;
@@ -427,7 +452,10 @@ fn few_source(h4: usize) -> String {
         )
         .replace(
             "WRITE_AVERAGES",
-            &(0..4).map(|t| format!("if (sg * 4u + {t}u < c.parts) {{ {} }}", (0..h4).map(|j| format!("o[q{t} + {j}u] = a{t}_{j} / sum[{t}];")).collect::<Vec<_>>().join(" "))).collect::<Vec<_>>().join("\n    "),
+            &(0..4)
+                .map(|t| format!("if (sg * 4u + {t}u < c.parts) {{ {} }}", (0..h4).map(|j| format!("o[q{t} + {j}u] = a{t}_{j} / sum[{t}];")).collect::<Vec<_>>().join(" ")))
+                .collect::<Vec<_>>()
+                .join("\n    "),
         )
         .replace("H4u", &format!("{h4}u"));
     for t in 0..4 {
@@ -713,6 +741,9 @@ pub struct Gpu {
     pub name: String,
     /// True if the adapter is a program standing in for a card: correct, but slower than the CPU path.
     pub software: bool,
+    /// Stages of fitting the card has done (each `Attend` call it took rather than declined), for callers that
+    /// want to know whether it was used at all.
+    pub stages: AtomicU64,
 }
 
 /// Working memory a card may use unless told otherwise (`Gpu::set_work_budget`): 1.5 GB. Fitting is at its
@@ -730,7 +761,9 @@ pub const WORK_BUDGET: usize = 1536 << 20;
 ///   budget is cut into sub-batches of rows that fit; fitting sizes its batches of columns and rows to it;
 /// * a buffer is made new only if no idle one of that size exists, and idle ones are released first whenever a
 ///   new one would take the total over the budget. Sizes are rounded up to four steps per doubling, so buffers
-///   for nearly the same number of tokens (a row with and without its class tokens, say) are shared;
+///   for nearly the same number of tokens (a row with and without its class tokens, say) are shared. What a
+///   call promises is the sum of every buffer it asks for: one it gave back itself cannot be released before
+///   its commands are handed to the card, so within a call only reuse, not release, makes room;
 /// * a call releases the idle buffers that the call before it did not use (`new_call`), and `Gpu::release`
 ///   releases all idle ones.
 ///
@@ -741,8 +774,10 @@ pub const WORK_BUDGET: usize = 1536 << 20;
 /// wholly before or wholly after, the card taking submissions one at a time. (A caller that spreads its work
 /// over several submissions keeps its loans until the last one.)
 struct Pool {
-    /// Each with the number of the call that last used it.
-    free: Vec<(wgpu::Buffer, u64)>,
+    /// Each with the number of the call that last used it, and, until that thread next submits its work, the
+    /// thread that gave it back: a buffer that commands not yet handed to the card refer to must not be
+    /// released (it may be lent again, see below).
+    free: Vec<(wgpu::Buffer, u64, Option<std::thread::ThreadId>)>,
     call: u64,
     /// Bytes of working buffers in existence: idle, on loan, or waiting to be read back.
     bytes: usize,
@@ -761,9 +796,9 @@ impl Pool {
     /// Count a buffer of `size` bytes that is about to be made. It must not take the total over the budget:
     /// idle buffers are released first, longest unused first.
     fn grow(&mut self, size: usize) {
-        while self.bytes + size > self.budget && !self.free.is_empty() {
-            let oldest = (0..self.free.len()).min_by_key(|i| self.free[*i].1).unwrap();
-            let (b, _) = self.free.swap_remove(oldest);
+        while self.bytes + size > self.budget {
+            let Some(oldest) = (0..self.free.len()).filter(|i| self.free[*i].2.is_none()).min_by_key(|i| self.free[*i].1) else { break };
+            let (b, _, _) = self.free.swap_remove(oldest);
             self.bytes -= b.size() as usize;
             b.destroy();
         }
@@ -791,7 +826,7 @@ impl Drop for Loan<'_> {
         let call = pool.call;
         let buf = self.buf.take().unwrap();
         pool.out -= buf.size() as usize;
-        pool.free.push((buf, call));
+        pool.free.push((buf, call, Some(std::thread::current().id())));
     }
 }
 
@@ -894,18 +929,14 @@ impl Gpu {
     /// `new` for a browser, where finding the card has to be waited for.
     pub async fn new_async() -> io::Result<Gpu> {
         let instance = wgpu::Instance::default();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })
-            .await
-            .map_err(|e| fail("none found", e))?;
+        let adapter =
+            instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() }).await.map_err(|e| fail("none found", e))?;
         let info = adapter.get_info();
         let limits = adapter.limits();
         let max_binding = (limits.max_storage_buffer_binding_size as usize).min(limits.max_buffer_size as usize);
         let align = limits.min_storage_buffer_offset_alignment as usize;
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor { label: Some("browsertabicl"), required_limits: limits, ..Default::default() })
-            .await
-            .map_err(|e| fail("could not be opened", e))?;
+        let (device, queue) =
+            adapter.request_device(&wgpu::DeviceDescriptor { label: Some("browsertabicl"), required_limits: limits, ..Default::default() }).await.map_err(|e| fail("could not be opened", e))?;
         // What the card objects to (out of memory, most of all) is kept for the call in progress to report as
         // an error, instead of stopping the program.
         let trouble: Arc<Mutex<Option<String>>> = Arc::default();
@@ -923,7 +954,20 @@ impl Gpu {
         let stage = Stage::new(&device);
         let pool = Pool { free: Vec::new(), call: 0, bytes: 0, peak: 0, out: 0, overdrawn: 0, reserved: 0, budget: WORK_BUDGET };
         let software = info.device_type == wgpu::DeviceType::Cpu;
-        Ok(Gpu { device, queue, stage, pool: Mutex::new(pool), pool_freed: Condvar::new(), fit: Mutex::default(), align, max_binding, trouble, name: format!("{} ({:?})", info.name, info.backend), software })
+        Ok(Gpu {
+            device,
+            queue,
+            stage,
+            pool: Mutex::new(pool),
+            pool_freed: Condvar::new(),
+            fit: Mutex::default(),
+            align,
+            max_binding,
+            trouble,
+            name: format!("{} ({:?})", info.name, info.backend),
+            software,
+            stages: AtomicU64::new(0),
+        })
     }
 
     /// Set how much working memory the card may use (see `Pool`). Idle buffers beyond it are released at once;
@@ -931,18 +975,24 @@ impl Gpu {
     pub fn set_work_budget(&self, bytes: usize) {
         let mut pool = self.pool.lock().unwrap();
         pool.budget = bytes;
+        let mut keep = Vec::new();
         while pool.bytes > bytes {
-            let Some((b, _)) = pool.free.pop() else { break };
-            pool.bytes -= b.size() as usize;
-            b.destroy();
+            let Some(f) = pool.free.pop() else { break };
+            if f.2.is_some() {
+                keep.push(f);
+                continue;
+            }
+            pool.bytes -= f.0.size() as usize;
+            f.0.destroy();
         }
+        pool.free.extend(keep);
     }
 
     pub fn work_budget(&self) -> usize {
         self.pool.lock().unwrap().budget
     }
 
-    /// Working memory on the card right now, and the most it has been, in bytes.
+    /// Working memory on the card right now, and the most it has been since the last `release`, in bytes.
     pub fn working(&self) -> (usize, usize) {
         let pool = self.pool.lock().unwrap();
         (pool.bytes, pool.peak)
@@ -958,10 +1008,13 @@ impl Gpu {
     pub fn release(&self) {
         self.fit.lock().unwrap().take();
         let mut pool = self.pool.lock().unwrap();
-        for (b, _) in std::mem::take(&mut pool.free) {
+        let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut pool.free).into_iter().partition(|f| f.2.is_none());
+        pool.free = kept;
+        for (b, _, _) in gone {
             pool.bytes -= b.size() as usize;
             b.destroy();
         }
+        pool.peak = pool.bytes;
     }
 
     /// An error if the card has objected to something since this was last asked.
@@ -975,7 +1028,11 @@ impl Gpu {
     /// One step: `pipe` over `count` invocations with the stage's bindings (two parameter blocks, weights,
     /// three inputs, one output).
     fn step(&self, pass: &mut wgpu::ComputePass, pipe: &wgpu::ComputePipeline, bufs: [At; 7], count: usize) {
-        let entries: Vec<_> = bufs.iter().enumerate().map(|(i, b)| wgpu::BindGroupEntry { binding: i as u32, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: b.0, offset: b.1 as u64, size: None }) }).collect();
+        let entries: Vec<_> = bufs
+            .iter()
+            .enumerate()
+            .map(|(i, b)| wgpu::BindGroupEntry { binding: i as u32, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: b.0, offset: b.1 as u64, size: None }) })
+            .collect();
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.stage.layout, entries: &entries });
         pass.set_pipeline(pipe);
         pass.set_bind_group(0, &group, &[]);
@@ -990,7 +1047,11 @@ impl Gpu {
         let need = bytes.max(64).div_ceil(16) * 16;
         let step = (need.next_power_of_two() / 8).max(16);
         let round = need.div_ceil(step) * step;
-        if round > self.max_binding { need } else { round }
+        if round > self.max_binding {
+            need
+        } else {
+            round
+        }
     }
 
     /// Bytes `storage(floats)` takes from the pool.
@@ -1044,11 +1105,16 @@ impl Gpu {
     fn storage(&self, floats: usize) -> Loan<'_> {
         let size = self.bk(floats);
         let mut pool = self.pool.lock().unwrap();
-        let buf = match pool.free.iter().position(|(b, _)| b.size() as usize == size) {
+        let buf = match pool.free.iter().position(|(b, _, _)| b.size() as usize == size) {
             Some(i) => pool.free.swap_remove(i).0,
             None => {
                 pool.grow(size);
-                self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: size as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })
+                self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size: size as u64,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
             }
         };
         pool.out += size;
@@ -1063,8 +1129,8 @@ impl Gpu {
         pool.call += 1;
         let now = pool.call;
         let mut freed = 0;
-        pool.free.retain(|(b, used)| {
-            let keep = *used + 1 >= now;
+        pool.free.retain(|(b, used, waiting)| {
+            let keep = *used + 1 >= now || waiting.is_some();
             if !keep {
                 freed += b.size() as usize;
                 b.destroy();
@@ -1088,7 +1154,12 @@ impl Gpu {
     /// A buffer to read `floats` numbers back through.
     fn back(&self, floats: usize) -> Back<'_> {
         let size = back_bytes(floats);
-        let buf = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("back"), size: size as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("back"),
+            size: size as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let mut pool = self.pool.lock().unwrap();
         pool.grow(size);
         pool.out += size;
@@ -1132,7 +1203,10 @@ impl Gpu {
     /// `at` was built for. Outputs go to `out` (`[rows][d]`), times row `layer` of `vscale`. The merge that
     /// follows the last block covers all rows, so `blocks` must end with the last one for `out` to be whole.
     #[allow(clippy::too_many_arguments)]
-    fn attention(&self, pass: &mut wgpu::ComputePass, at: &Att, wk: &AttWork, blocks: std::ops::Range<usize>, rows: usize, n: usize, d: usize, heads: usize, layer: usize, qt: &wgpu::Buffer, k: At, v: At, vscale: &wgpu::Buffer, out: At, skip: &str) {
+    fn attention(
+        &self, pass: &mut wgpu::ComputePass, at: &Att, wk: &AttWork, blocks: std::ops::Range<usize>, rows: usize, n: usize, d: usize, heads: usize, layer: usize, qt: &wgpu::Buffer, k: At, v: At,
+        vscale: &wgpu::Buffer, out: At, skip: &str,
+    ) {
         let st = &self.stage;
         let no = At(&st.dummy, 0);
         let params = |q0: usize, qb: usize| {
@@ -1152,10 +1226,26 @@ impl Gpu {
         }
     }
 
+    /// Hand `enc` to the card. The buffers this thread gave back while recording may be released from now on.
+    fn submit(&self, enc: wgpu::CommandEncoder) -> wgpu::SubmissionIndex {
+        let index = self.queue.submit([enc.finish()]);
+        self.settled();
+        index
+    }
+
+    /// Everything this thread has recorded is with the card: the buffers it gave back may be released. Called
+    /// on submitting, and at the end of each call (whose loans go back after its last submission).
+    fn settled(&self) {
+        let me = Some(std::thread::current().id());
+        for f in self.pool.lock().unwrap().free.iter_mut().filter(|f| f.2 == me) {
+            f.2 = None;
+        }
+    }
+
     /// Hand `enc` to the card and ask for `back` (which `enc` copies results into) to be made readable when
     /// that work is done. Nothing waits here.
     fn send<'a>(&'a self, enc: wgpu::CommandEncoder, back: Back<'a>, floats: usize) -> Pending<'a> {
-        let index = self.queue.submit([enc.finish()]);
+        let index = self.submit(enc);
         let (tx, done) = once();
         back.buf.slice(..).map_async(wgpu::MapMode::Read, move |r| tx.send(r));
         Pending { back, done, index, floats }
@@ -1182,7 +1272,9 @@ impl Gpu {
     /// on the card in the attention shader's layout (`n` of them; `kscale` and row `layer` of `vscale` are their
     /// scales if they are packed). The caller has reserved `att_need` of working memory.
     #[allow(clippy::too_many_arguments)]
-    async fn attend_buffers(&self, q: &[f32], k: &wgpu::Buffer, v: &wgpu::Buffer, kscale: Option<&[f32]>, vscale: &wgpu::Buffer, layer: usize, n: usize, d: usize, heads: usize) -> io::Result<Vec<f32>> {
+    async fn attend_buffers(
+        &self, q: &[f32], k: &wgpu::Buffer, v: &wgpu::Buffer, kscale: Option<&[f32]>, vscale: &wgpu::Buffer, layer: usize, n: usize, d: usize, heads: usize,
+    ) -> io::Result<Vec<f32>> {
         let nq = q.len() / d;
         let at = if kscale.is_some() { &self.stage.att_i16 } else { &self.stage.att_f32 };
         assert!(d / heads == at.hd, "the shader is built for heads {} numbers wide", at.hd);
@@ -1200,12 +1292,13 @@ impl Gpu {
                     let mut pass = enc.begin_compute_pass(&Default::default());
                     self.attention(&mut pass, at, &wk, b0..(b0 + 8).min(blocks), nq, n, d, heads, layer, &qt, At(k, 0), At(v, 0), vscale, At(&ob, 0), "");
                 }
-                self.queue.submit([enc.finish()]);
+                self.submit(enc);
             }
             let mut enc = self.device.create_command_encoder(&Default::default());
             enc.copy_buffer_to_buffer(&ob, 0, &back.buf, 0, bytes);
             self.send(enc, back, nq * d)
         };
+        self.settled();
         self.take(pending).await
     }
 
@@ -1257,6 +1350,38 @@ impl Gpu {
         }
     }
 
+    /// The weights of `m` on the card, for fitting and for prediction alike: uploaded the first time, kept while
+    /// the same model is used (until `release`).
+    pub fn weights(&self, m: &Model) -> Arc<GpuWeights> {
+        self.fit_weights(m)
+    }
+
+    /// How fast this card does the in-context attention, in multiply-adds per second: the best of repeated
+    /// runs of 256 queries over 2,048 keys for about `ms` milliseconds. For estimating how long work will take.
+    pub async fn calibrate(&self, ms: f64) -> io::Result<f64> {
+        let (nq, n, d, heads) = (256, 2048, 512, 8);
+        let mut s = 0x2545F4914F6CDD1Du64;
+        let mut rnd = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+        };
+        let (q, k, v): (Vec<f32>, Vec<f32>, Vec<f32>) = ((0..nq * d).map(|_| rnd()).collect(), (0..n * d).map(|_| rnd()).collect(), (0..n * d).map(|_| rnd()).collect());
+        let t0 = web_time::Instant::now();
+        let mut best = 0.0f64;
+        // the first run includes setting up; at least three runs, then as many as the time allows
+        for i in 0.. {
+            let t = web_time::Instant::now();
+            self.attend_rows_async(&q, &k, &v, d, heads).await?;
+            best = best.max((2 * nq * n * d) as f64 / t.elapsed().as_secs_f64().max(1e-6));
+            if i >= 2 && t0.elapsed().as_secs_f64() * 1e3 > ms {
+                break;
+            }
+        }
+        Ok(best)
+    }
+
     /// Submit `enc` after adding copies of the first `floats` numbers of each buffer in `what`; `fetched` waits
     /// for them.
     fn fetch(&self, mut enc: wgpu::CommandEncoder, what: &[(&wgpu::Buffer, usize)]) -> Fetch<'_> {
@@ -1288,7 +1413,13 @@ impl Gpu {
         let (e, inds, nb) = (m.e, m.inds, m.col.len());
         let (n, toks, per) = (rows * g, g * inds, rows.div_ceil(16) * 16);
         let partial = self.att_cut(4, e / m.col_heads, inds, rows, m.col_heads).4;
-        2 * self.bk(n * e) + self.bk(g * e * per) + self.work_need(n, e, 2 * e, n) + self.work_need(toks, e, 2 * e, toks) + self.bk(partial) + nb * (3 * self.bk(toks * e) + self.bk(inds * e)) + back_bytes(n * e + 2 * nb * toks * e)
+        2 * self.bk(n * e)
+            + self.bk(g * e * per)
+            + self.work_need(n, e, 2 * e, n)
+            + self.work_need(toks, e, 2 * e, toks)
+            + self.bk(partial)
+            + nb * (3 * self.bk(toks * e) + self.bk(inds * e))
+            + back_bytes(n * e + 2 * nb * toks * e)
     }
 
     /// Working memory the row stage borrows for `n` rows of `features` cells (wherever it is recorded).
@@ -1358,6 +1489,7 @@ impl Attend for Gpu {
                 }
             }
             let _hold = self.reserve(self.attend_need(rows, d))?;
+            self.stages.fetch_add(1, Relaxed);
             let (kb, vb, ones) = (self.fill(&k), self.fill(&v), self.upload(&vec![1.0f32; d]));
             self.attend_buffers(q, &kb, &vb, None, &ones, 0, rows, d, heads).await
         })
@@ -1371,7 +1503,7 @@ impl Attend for Gpu {
         let per_group = rows * m.e * 4;
         let hd = m.e / m.col_heads;
         // what the shaders and the buffer offsets below assume
-        if m.group != 3 || hd % 16 != 0 || (m.e * 64) % self.align != 0 || 2 * per_group > self.max_binding {
+        if m.group != 3 || !hd.is_multiple_of(16) || !(m.e * 64).is_multiple_of(self.align) || 2 * per_group > self.max_binding {
             return 0;
         }
         self.batch((FIT_BUDGET.min(self.max_binding / 2) / per_group).max(1), |g| self.columns_need(m, rows, g))
@@ -1385,6 +1517,7 @@ impl Attend for Gpu {
             let (n, toks) = (rows * g, g * inds);
             let blocks = gw.ind.len();
             let hold = self.reserve(self.columns_need(m, rows, g))?;
+            self.stages.fetch_add(1, Relaxed);
             self.new_call();
             let fetch = {
                 let (st, at) = (&self.stage, gw.col_att.as_ref().expect("a model loaded for fitting"));
@@ -1421,7 +1554,23 @@ impl Attend for Gpu {
                         self.run(pass, &skip, "", &st.turnv, &pt.sel[0], a1, [&w.att, no, no], &vr, n * e);
                         // the inducing points attend to their group's cells
                         for gi in 0..g {
-                            self.attention(pass, at, &wk, 0..wk.np.div_ceil(wk.qb), inds, rows, e, heads, 0, &qt[bi], At(&kc, gi * e * per * 4), At(&vr, gi * rows * e * 4), &ones, At(&wi.att, gi * inds * e * 4), "");
+                            self.attention(
+                                pass,
+                                at,
+                                &wk,
+                                0..wk.np.div_ceil(wk.qb),
+                                inds,
+                                rows,
+                                e,
+                                heads,
+                                0,
+                                &qt[bi],
+                                At(&kc, gi * e * per * 4),
+                                At(&vr, gi * rows * e * 4),
+                                &ones,
+                                At(&wi.att, gi * inds * e * 4),
+                                "",
+                            );
                         }
                         self.tail(pass, &skip, "", &pi, a1, &hid[bi], &wi, toks, e, 2 * e);
                         // their keys and values for the second attention: this is what prediction reuses
@@ -1441,6 +1590,7 @@ impl Attend for Gpu {
                 }
                 self.fetch(enc, &what)
             };
+            self.settled();
             let recorded = t.elapsed().as_secs_f64() * 1e3;
             let got = self.fetched(fetch).await?;
             drop(hold);
@@ -1477,6 +1627,7 @@ impl Attend for Gpu {
             let features = cells.len() / (n * gw.e);
             let t = web_time::Instant::now();
             let hold = self.reserve(self.rows_need(m, n, features))?;
+            self.stages.fetch_add(1, Relaxed);
             self.new_call();
             let fetch = {
                 let (ct, hb) = (self.fill(cells), self.storage(n * gw.d));
@@ -1487,6 +1638,7 @@ impl Attend for Gpu {
                 }
                 self.fetch(enc, &[(&hb, n * gw.d)])
             };
+            self.settled();
             let recorded = t.elapsed().as_secs_f64() * 1e3;
             reps.copy_from_slice(&self.fetched(fetch).await?[0]);
             drop(hold);
@@ -1506,6 +1658,7 @@ impl Attend for Gpu {
                 return Ok(false);
             }
             let _hold = self.reserve(self.in_context_need(m, rows))?;
+            self.stages.fetch_add(1, Relaxed);
             self.new_call();
             let no = &st.dummy;
             let skip = Skip(String::new());
@@ -1549,6 +1702,8 @@ impl Attend for Gpu {
                     sink(lb, &got[0], &got[1])?;
                 }
             }
+            drop((wk, hb, w, kr, vr, kc, hid));
+            self.settled();
             if let Some((lb, f, t)) = before {
                 let got = self.fetched(f).await?;
                 trace(|| format!("gpu: in-context layer {lb}: {:.0} ms", t.elapsed().as_secs_f64() * 1e3));
@@ -1590,18 +1745,32 @@ struct Stage {
 impl Stage {
     /// The many-keys attention for heads `hd` numbers wide, `qn` queries per invocation.
     fn att(device: &wgpu::Device, layout: &wgpu::PipelineLayout, packed: bool, hd: usize, qn: usize) -> Att {
-        assert!(hd % 16 == 0, "the many-keys attention is written for heads a multiple of 16 numbers wide");
+        assert!(hd.is_multiple_of(16), "the many-keys attention is written for heads a multiple of 16 numbers wide");
         let (ty, sixteen) = if packed { ("vec4<i32>", SIXTEEN_I16) } else { ("vec4<f32>", SIXTEEN_F32) };
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("attend"), source: wgpu::ShaderSource::Wgsl(attend_source(qn, hd / 4, ty, sixteen).into()) });
-        let pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("attend"), layout: Some(layout), module: &module, entry_point: Some("attend"), compilation_options: Default::default(), cache: None });
+        let pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("attend"),
+            layout: Some(layout),
+            module: &module,
+            entry_point: Some("attend"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         Att { pipe, qn, hd }
     }
 
     /// The few-keys attention (`SHADER_FEW`) for heads `hd` numbers wide.
     fn few(&self, device: &wgpu::Device, hd: usize) -> wgpu::ComputePipeline {
-        assert!(hd % 4 == 0 && hd <= 64, "the few-keys attention is written for heads of up to 64 numbers, in fours");
+        assert!(hd.is_multiple_of(4) && hd <= 64, "the few-keys attention is written for heads of up to 64 numbers, in fours");
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("few-keys"), source: wgpu::ShaderSource::Wgsl(few_source(hd / 4).into()) });
-        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("attend1"), layout: Some(&self.pipeline_layout), module: &module, entry_point: Some("attend1"), compilation_options: Default::default(), cache: None })
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("attend1"),
+            layout: Some(&self.pipeline_layout),
+            module: &module,
+            entry_point: Some("attend1"),
+            compilation_options: Default::default(),
+            cache: None,
+        })
     }
 }
 
@@ -1622,7 +1791,14 @@ impl Stage {
         let main = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("stage"), source: wgpu::ShaderSource::Wgsl(format!("{STAGE_HEAD}{SHADER_STAGE}").into()) });
         let lin = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("linear"), source: wgpu::ShaderSource::Wgsl(format!("{STAGE_HEAD}{SHADER_LINEAR}").into()) });
         let make = |module: &wgpu::ShaderModule, entry: &str| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some(entry), layout: Some(&pl), module, entry_point: Some(entry), compilation_options: Default::default(), cache: None })
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&pl),
+                module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
         };
         let dummy = device.create_buffer(&wgpu::BufferDescriptor { label: Some("unused"), size: 64, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
         let dummy_u = device.create_buffer(&wgpu::BufferDescriptor { label: Some("unused"), size: 96, usage: wgpu::BufferUsages::UNIFORM, mapped_at_creation: false });
@@ -1732,20 +1908,82 @@ impl GpuWeights {
         // the inducing points' keys are stored divided by sqrt(head width); when the card makes them itself
         // (fitting), it does so with key weights that already carry that factor
         let col_inv = 1.0 / ((e_ / m.col_heads) as f32).sqrt();
-        let col: Vec<_> = m.col.iter().map(|isab| {
-            let b = &isab.a2;
-            let scaled = |x: &[f32]| x.iter().map(|v| v * col_inv).collect::<Vec<f32>>();
-            let (kw, kb, vw, vb) = if fit { (scaled(&b.in_w[e_ * e_..2 * e_ * e_]), scaled(&b.in_b[e_..2 * e_]), &b.in_w[2 * e_ * e_..], &b.in_b[2 * e_..]) } else { (Vec::new(), Vec::new(), e, e) };
-            pack(&[&b.n1w, &b.n1b, &b.in_w[..e_ * e_], &b.in_b[..e_], e, e, e, e, &b.out_w, &b.out_b, &b.n2w, &b.n2b, &b.l1w, &b.l1b, &b.l2w, &b.l2b, &kw, &kb, vw, vb], 0)
-        }).collect();
+        let col: Vec<_> = m
+            .col
+            .iter()
+            .map(|isab| {
+                let b = &isab.a2;
+                let scaled = |x: &[f32]| x.iter().map(|v| v * col_inv).collect::<Vec<f32>>();
+                let (kw, kb, vw, vb) =
+                    if fit { (scaled(&b.in_w[e_ * e_..2 * e_ * e_]), scaled(&b.in_b[e_..2 * e_]), &b.in_w[2 * e_ * e_..], &b.in_b[2 * e_..]) } else { (Vec::new(), Vec::new(), e, e) };
+                pack(&[&b.n1w, &b.n1b, &b.in_w[..e_ * e_], &b.in_b[..e_], e, e, e, e, &b.out_w, &b.out_b, &b.n2w, &b.n2b, &b.l1w, &b.l1b, &b.l2w, &b.l2b, &kw, &kb, vw, vb], 0)
+            })
+            .collect();
         // fitting only: the blocks in which the inducing points attend to a column's training cells
-        let col1: Vec<_> = m.col.iter().filter_map(|isab| isab.a1.as_ref()).map(|b| {
-            pack(&[&b.n1w, &b.n1b, e, e, e, e, e, e, &b.out_w, &b.out_b, &b.n2w, &b.n2b, &b.l1w, &b.l1b, &b.l2w, &b.l2b, &b.in_w[e_ * e_..2 * e_ * e_], &b.in_b[e_..2 * e_], &b.in_w[2 * e_ * e_..], &b.in_b[2 * e_..]], 0)
-        }).collect();
-        let mut row: Vec<_> = m.row.iter().map(|b| {
-            let (w3, b3) = (&b.in_w, &b.in_b);
-            pack(&[&b.n1w, &b.n1b, &w3[..e_ * e_], &b3[..e_], e, e, e, e, &b.out_w, &b.out_b, &b.n2w, &b.n2b, &b.l1w, &b.l1b, &b.l2w, &b.l2b, &w3[e_ * e_..2 * e_ * e_], &b3[e_..2 * e_], &w3[2 * e_ * e_..], &b3[2 * e_..]], 0)
-        }).collect();
+        let col1: Vec<_> = m
+            .col
+            .iter()
+            .filter_map(|isab| isab.a1.as_ref())
+            .map(|b| {
+                pack(
+                    &[
+                        &b.n1w,
+                        &b.n1b,
+                        e,
+                        e,
+                        e,
+                        e,
+                        e,
+                        e,
+                        &b.out_w,
+                        &b.out_b,
+                        &b.n2w,
+                        &b.n2b,
+                        &b.l1w,
+                        &b.l1b,
+                        &b.l2w,
+                        &b.l2b,
+                        &b.in_w[e_ * e_..2 * e_ * e_],
+                        &b.in_b[e_..2 * e_],
+                        &b.in_w[2 * e_ * e_..],
+                        &b.in_b[2 * e_..],
+                    ],
+                    0,
+                )
+            })
+            .collect();
+        let mut row: Vec<_> = m
+            .row
+            .iter()
+            .map(|b| {
+                let (w3, b3) = (&b.in_w, &b.in_b);
+                pack(
+                    &[
+                        &b.n1w,
+                        &b.n1b,
+                        &w3[..e_ * e_],
+                        &b3[..e_],
+                        e,
+                        e,
+                        e,
+                        e,
+                        &b.out_w,
+                        &b.out_b,
+                        &b.n2w,
+                        &b.n2b,
+                        &b.l1w,
+                        &b.l1b,
+                        &b.l2w,
+                        &b.l2b,
+                        &w3[e_ * e_..2 * e_ * e_],
+                        &b3[e_..2 * e_],
+                        &w3[2 * e_ * e_..],
+                        &b3[2 * e_..],
+                    ],
+                    0,
+                )
+            })
+            .collect();
         row.push(pack(&[&m.out_lnw, &m.out_lnb], 0));
         assert!(m.group == 3, "the card's input layer is written for feature groups of three");
         let input: Vec<f32> = (0..m.e).flat_map(|j| [m.in_w[j * 3], m.in_w[j * 3 + 1], m.in_w[j * 3 + 2], m.in_b[j]]).collect();
@@ -1868,7 +2106,8 @@ impl Gpu {
                         }
                     }
                 }
-                let put = |data: &[f32]| self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("col"), contents: bytemuck::cast_slice(data), usage: wgpu::BufferUsages::STORAGE });
+                let put =
+                    |data: &[f32]| self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("col"), contents: bytemuck::cast_slice(data), usage: wgpu::BufferUsages::STORAGE });
                 col.push((put(&k), put(&v)));
             }
         }
@@ -1919,15 +2158,14 @@ impl Gpu {
         let base = self.bk(partial) + self.bk(nq * d);
         // the in-context stage
         let icl = self.work_need(nq, d, ff, np * at.qn) + self.bk(nq * heads * 64) + self.bk((nq * out_n).div_ceil(4) * 4);
-        let (mut most, mut widest) = (icl, partial.max(nq * ff) * 4);
+        let (mut all, mut widest) = (icl, partial.max(nq * ff) * 4);
         if raw {
-            // the rows as given and their cells, then the column stage's or the row stage's working set
-            let cells = self.bk(nq * g) + self.bk(nq * g * e);
-            let cols = self.work_need(nq * g, e, 2 * e, nq * g);
-            most = most.max(cells + cols.max(self.row_stage_need(e, gw.n_cls, nq, g)));
+            // the rows as given and their cells, the column stage's and the row stage's working sets (the
+            // stages share buffers of the same size, but that saving is not counted on: see `Pool`)
+            all += self.bk(nq * vm.features) + self.bk(nq * g * e) + self.work_need(nq * g, e, 2 * e, nq * g) + self.row_stage_need(e, gw.n_cls, nq, g);
             widest = widest.max(nq * (g + gw.n_cls) * 2 * e * 4);
         }
-        (base + most + back_bytes(nq * out_n), widest)
+        (base + all + back_bytes(nq * out_n), widest)
     }
 
     async fn chain(&self, gw: &GpuWeights, vm: &VramModel, h: &[f32], x: Option<&[f32]>, out_n: usize) -> io::Result<Vec<f32>> {
@@ -1943,7 +2181,11 @@ impl Gpu {
         let raw = x.is_some();
         let fits = |n: usize| {
             let (need, widest) = self.chain_need(gw, vm, n, raw, out_n);
-            if widest > self.max_binding { usize::MAX } else { need }
+            if widest > self.max_binding {
+                usize::MAX
+            } else {
+                need
+            }
         };
         let sub = self.batch(nq, fits);
         if sub == 0 {
@@ -1967,6 +2209,7 @@ impl Gpu {
                 }
             };
             let p = self.record(gw, vm, &input[r0 * width..(r0 + n) * width], raw, n, out_n);
+            self.settled();
             hold.shrink(back_bytes(n * out_n));
             waiting.push((p, hold));
         }
@@ -2078,7 +2321,10 @@ impl Gpu {
 
     /// One step of a stage, unless one of the groups it belongs to (the letters of `tag`) is being skipped.
     #[allow(clippy::too_many_arguments)]
-    fn run(&self, pass: &mut wgpu::ComputePass, skip: &Skip, tag: &str, pipe: &wgpu::ComputePipeline, cu: &wgpu::Buffer, block: &(wgpu::Buffer, wgpu::Buffer), x: [&wgpu::Buffer; 3], o: &wgpu::Buffer, count: usize) {
+    fn run(
+        &self, pass: &mut wgpu::ComputePass, skip: &Skip, tag: &str, pipe: &wgpu::ComputePipeline, cu: &wgpu::Buffer, block: &(wgpu::Buffer, wgpu::Buffer), x: [&wgpu::Buffer; 3], o: &wgpu::Buffer,
+        count: usize,
+    ) {
         if !tag.chars().any(|t| skip.0.contains(t)) {
             self.step(pass, pipe, [cu, &block.1, &block.0, x[0], x[1], x[2], o].map(|b| At(b, 0)), count)
         }
@@ -2087,7 +2333,10 @@ impl Gpu {
     /// Matrix `sel` of `block` (see the shader's `lin_w`) applied to `rows` rows of `x0`, giving `wide` numbers
     /// per row in `o`; `x1` is what the matrices that close a residual branch add.
     #[allow(clippy::too_many_arguments)]
-    fn lin(&self, pass: &mut wgpu::ComputePass, skip: &Skip, tag: &str, p: &Params, sel: usize, block: &(wgpu::Buffer, wgpu::Buffer), x0: &wgpu::Buffer, x1: &wgpu::Buffer, o: &wgpu::Buffer, rows: usize, wide: usize) {
+    fn lin(
+        &self, pass: &mut wgpu::ComputePass, skip: &Skip, tag: &str, p: &Params, sel: usize, block: &(wgpu::Buffer, wgpu::Buffer), x0: &wgpu::Buffer, x1: &wgpu::Buffer, o: &wgpu::Buffer, rows: usize,
+        wide: usize,
+    ) {
         let st = &self.stage;
         if rows * wide <= FEW_OUTPUTS {
             self.run(pass, skip, tag, &st.linear1, &p.sel[sel], block, [x0, x1, &st.dummy], o, rows * wide);
@@ -2138,7 +2387,10 @@ impl Gpu {
 
     /// One of those blocks, with the working buffers and parameters `column_blocks` makes.
     #[allow(clippy::too_many_arguments)]
-    fn column_block(&self, pass: &mut wgpu::ComputePass, skip: &Skip, gw: &GpuWeights, b: &(wgpu::Buffer, wgpu::Buffer), kb: &wgpu::Buffer, vb: &wgpu::Buffer, nq: usize, g: usize, ct: &wgpu::Buffer, w: &Work, p: &Params) {
+    fn column_block(
+        &self, pass: &mut wgpu::ComputePass, skip: &Skip, gw: &GpuWeights, b: &(wgpu::Buffer, wgpu::Buffer), kb: &wgpu::Buffer, vb: &wgpu::Buffer, nq: usize, g: usize, ct: &wgpu::Buffer, w: &Work,
+        p: &Params,
+    ) {
         let (e, cells) = (gw.e, nq * g);
         self.head(pass, skip, "c", p, b, ct, w, cells, e);
         self.run(pass, skip, "cx", &gw.col_few, &p.sel[0], b, [&w.q0, kb, vb], &w.att, g * gw.col_heads * nq.div_ceil(4));

@@ -98,11 +98,12 @@ impl<V> Ledger<V> {
 
     /// Remove everything `tenant` holds (for `model` only, if given).
     pub fn evict(&mut self, tenant: &str, model: Option<&str>) -> Vec<V> {
-        let keys: Vec<Key> = self.entries.keys().filter(|k| &*k.0 == tenant && model.map_or(true, |m| &*k.1 == m)).cloned().collect();
+        let keys: Vec<Key> = self.entries.keys().filter(|k| &*k.0 == tenant && model.is_none_or(|m| &*k.1 == m)).cloned().collect();
         keys.iter().filter_map(|k| self.remove(k)).collect()
     }
 
     /// Every entry with its owner and size.
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
     pub fn iter(&self) -> impl Iterator<Item = (&Key, &V, usize)> {
         self.entries.iter().map(|(k, e)| (k, &e.0, e.1))
     }
@@ -234,5 +235,57 @@ mod tests {
         warm.evict("alice", None);
         assert_eq!(warm.held("alice").1, 0);
         assert_eq!(held.words[0], 1);
+    }
+
+    fn key(t: &str, n: u64) -> Key {
+        (t.into(), "m".into(), "kv".into(), n)
+    }
+
+    #[test]
+    fn ledger_rules() {
+        let mut l: Ledger<u32> = Ledger::default();
+        // an entry bigger than a tenant's share is refused and handed back
+        assert_eq!(l.admit(key("a", 0), 11, 7, 100, 10, |_| true), Err((7, vec![])));
+        assert_eq!(l.admit(key("a", 1), 6, 1, 20, 10, |_| true), Ok(vec![]));
+        // over the tenant's share: its own oldest goes
+        assert_eq!(l.admit(key("b", 1), 6, 2, 20, 10, |_| true), Ok(vec![]));
+        assert_eq!(l.admit(key("a", 2), 6, 3, 20, 10, |_| true), Ok(vec![1]));
+        // over the overall budget: the least recently used of anyone's (b's, since a's 3 is newer)
+        l.get(&key("a", 2));
+        assert_eq!(l.admit(key("c", 1), 9, 4, 20, 10, |_| true), Ok(vec![2]));
+        assert_eq!(l.held("a"), (15, 6));
+        // nothing may go: refused, and the entries considered stay
+        assert_eq!(l.admit(key("d", 1), 9, 5, 20, 10, |_| false), Err((5, vec![])));
+        assert!(l.contains(&key("a", 2)) && l.contains(&key("c", 1)));
+        // replacing an entry gives the old one back and counts its bytes once
+        assert_eq!(l.admit(key("a", 2), 4, 6, 20, 10, |_| true), Ok(vec![3]));
+        assert_eq!(l.held("a"), (13, 4));
+        assert_eq!(*l.get(&key("a", 2)).unwrap(), 6);
+        assert!(l.get(&key("a", 99)).is_none());
+        assert_eq!(l.iter().map(|(_, _, n)| n).sum::<usize>(), 13);
+        assert_eq!(l.evict("c", Some("other model")), Vec::<u32>::new());
+        assert_eq!(l.evict("c", None), vec![4]);
+        assert_eq!(l.remove(&key("a", 2)), Some(6));
+        assert_eq!(l.remove(&key("a", 2)), None);
+        assert_eq!(l.held("a"), (0, 0));
+    }
+
+    #[test]
+    fn concurrent_loads_of_one_piece() {
+        let warm = Warm::new(1 << 20, 1 << 20, false);
+        let h = warm.handle("t", "m");
+        assert!(format!("{h:?}").contains("tenant t"));
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                let h = h.clone();
+                s.spawn(move || assert_eq!(h.get("x", 0, || Ok(vec![5; 10])).unwrap().words, [5; 10]));
+            }
+        });
+        assert_eq!(warm.held("t").1, 40, "held once however many threads loaded it");
+        assert_eq!(warm.hits.load(Relaxed) + warm.misses.load(Relaxed), 8);
+        // a load that fails is passed on and nothing is kept
+        let e = h.get("y", 0, || Err(io::Error::other("storage down"))).err().unwrap();
+        assert_eq!(e.to_string(), "storage down");
+        assert_eq!(warm.held("t").1, 40);
     }
 }
