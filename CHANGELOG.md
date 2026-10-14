@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The web page would not start in Safari, and so in any browser on an iPhone or iPad: the engine file held
+  WebAssembly relaxed-SIMD instructions (from `pulp`'s default `relaxed-simd` feature, compiled in though never
+  run), which Safari refuses. The engine now comes in three builds (relaxed SIMD, plain SIMD, no SIMD); each
+  browser is given the fastest one it accepts and downloads only that one.
+- On phones and tablets that do not report their memory the page runs at most two workers, to stay within what
+  the browser allows a page.
+
 ## [0.1.0] - 2026-10-14
 
 First release.

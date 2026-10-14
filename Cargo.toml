@@ -28,7 +28,11 @@ name = "tabicl-anywhere"
 path = "src/bin/tabicl-anywhere.rs"
 
 [dependencies]
-pulp = { version = "0.22", features = ["x86-v4"] }
+# pulp's default features include "relaxed-simd", which puts WebAssembly relaxed-SIMD instructions into the
+# engine file even when they are never run, and Safari (every browser on iOS) refuses the whole file because of
+# them. So the defaults are off and relaxed SIMD is a feature of its own (below), used only for the browser
+# build that is handed to browsers which accept it.
+pulp = { version = "0.22", default-features = false, features = ["std", "x86-v3", "x86-v4"] }
 rayon = "1"
 bytemuck = { version = "1", features = ["extern_crate_alloc"] }
 libm = "0.2"
@@ -59,3 +63,7 @@ wgpu = { version = "30.0.1", optional = true }
 # Graphics-card acceleration (Vulkan, Metal, DirectX through wgpu; WebGPU in a browser). Off by default: the
 # default build has no GPU code.
 gpu = ["dep:wgpu"]
+# WebAssembly relaxed SIMD (fused multiply-add and friends). Build with it only together with
+# RUSTFLAGS="-C target-feature=+simd128,+relaxed-simd": the result runs only where the browser accepts relaxed
+# SIMD (Chrome and Edge among others; not Safari), so tools/build-wasm.sh also makes a plain-SIMD build for the rest.
+relaxed-simd = ["pulp/relaxed-simd"]

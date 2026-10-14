@@ -16,9 +16,14 @@ const arg = (name, d) => { const i = process.argv.indexOf(name); return i > 0 ? 
 const shots = arg("--shots", null);
 const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".wasm": "application/wasm", ".json": "application/json", ".bin": "application/octet-stream", ".txt": "text/plain" };
 const requests = [];
+let breakEngine = false; // serve a damaged engine file, to see what the page tells the visitor
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://x");
   requests.push(url.pathname);
+  if (breakEngine && url.pathname.endsWith(".wasm")) {
+    res.writeHead(200, { "content-type": types[".wasm"] });
+    return res.end(Buffer.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, 0x0a, 5, 1, 3, 0, 0xfd, 0xff]));
+  }
   if (url.pathname === "/framed.html") {
     // the page inside a sandboxed frame with no origin of its own: a stand-in for a restrictive host
     res.writeHead(200, { "content-type": types[".html"] });
@@ -47,6 +52,8 @@ try {
   await page.goto(base + "/index.html");
   await page.waitForFunction(() => /Engine running/.test(document.getElementById("hw-engine").textContent), { timeout: 40000 });
   console.log("     " + (await text(page, "#hw-engine")));
+  const engineFiles = () => requests.filter((p) => /\.wasm$/.test(p));
+  check((await page.$eval("#hw-engine", (n) => n.dataset.build)) === "relaxed" && engineFiles().every((p) => p.endsWith("/pkg/tabicl_anywhere_wasm_relaxed.wasm")), `Chromium gets the relaxed-SIMD build of the engine, and downloads no other (${[...new Set(engineFiles())].join(", ")})`);
   await page.waitForFunction(() => !/getting it ready|Looking/.test(document.getElementById("hw-gpu").textContent), { timeout: 40000 });
   console.log("     " + (await text(page, "#hw-gpu")));
   // headless Chromium offers only a software stand-in for a card, which the page reports and passes over
@@ -167,6 +174,68 @@ try {
     await shot(page, `4-${w}-${scheme}`);
   }
   check(problems.length === 0, `no errors in the browser console${problems.length ? ": " + problems.join(" | ") : ""}`);
+
+  // a phone: Safari's engine (no relaxed SIMD) on a small screen with few threads and no memory figure. Chromium
+  // cannot turn relaxed SIMD off, so ?engine=simd forces the build Safari's answer to the probes selects (the
+  // probes themselves are checked in tools/test-site.mjs, and in a real WebKit with tools/test-webkit.py).
+  {
+    const phone = await browser.createBrowserContext();
+    const p = await phone.newPage();
+    const errs = [];
+    p.on("console", (m) => { if (m.type() === "error") errs.push(m.text()); });
+    p.on("pageerror", (e) => errs.push(String(e)));
+    await p.setUserAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/141.0.7390.96 Mobile/15E148 Safari/604.1");
+    await p.setViewport({ width: 390, height: 844, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+    await p.evaluateOnNewDocument(() => {
+      Object.defineProperty(Navigator.prototype, "hardwareConcurrency", { get: () => 6 });
+      Object.defineProperty(Navigator.prototype, "deviceMemory", { get: () => undefined });
+      Object.defineProperty(Navigator.prototype, "gpu", { get: () => undefined }); // (Safari on iOS before 26 has none)
+      const Real = window.Worker;
+      window.__workersMade = 0;
+      window.Worker = function (...a) { window.__workersMade++; return new Real(...a); };
+    });
+    const from = requests.length;
+    await p.goto(base + "/index.html?engine=simd");
+    await p.waitForFunction(() => /Engine running|did not start/.test(document.getElementById("hw-engine").textContent), { timeout: 60000 });
+    console.log("     phone: " + (await text(p, "#hw-engine")));
+    const wasmAsked = requests.slice(from).filter((r) => /\.wasm$/.test(r));
+    check((await p.$eval("#hw-engine", (n) => n.dataset.build)) === "simd" && wasmAsked.every((r) => r.endsWith("/pkg/tabicl_anywhere_wasm_bg.wasm")), `phone: the plain-SIMD build runs, and only it is downloaded (${[...new Set(wasmAsked)].join(", ")})`);
+    await p.click("#sample");
+    await p.waitForFunction(() => !document.getElementById("table-details").hidden);
+    const est = await text(p, "#estimate");
+    console.log("     phone: " + est.split(". ")[0]);
+    check(/on 2 processor threads/.test(est), "phone: the example table is planned on 2 workers (not one per thread)");
+    await p.click("#fit");
+    await p.waitForFunction(() => /^(Done|Fitting failed|Stopped)/.test(document.getElementById("fit-status").textContent), { timeout: 300000 });
+    const st = await text(p, "#fit-status");
+    console.log("     phone: " + st);
+    check(/^Done/.test(st) && (await p.evaluate(() => window.__workersMade)) <= 2, `phone: fitting the example table works, with at most 2 workers started (${await p.evaluate(() => window.__workersMade)})`);
+    await p.$eval("#new-rows", (t) => { t.value = "light_hours,water_ml,soil,temperature_c\n12,110,loam,22\n4.5,20,clay,13\n"; });
+    await p.click("#predict");
+    await p.waitForFunction(() => /^(Predicted|Predicting failed)/.test(document.getElementById("predict-status").textContent), { timeout: 120000 });
+    const pr = await p.$$eval("#results-body tr", (trs) => trs.map((tr) => [...tr.children].map((td) => td.textContent)));
+    check(pr.length === 2 && pr[0][1] === "thrived" && pr[1][1] === "died", `phone: predicting works (${JSON.stringify(pr.map((r) => r[1]))})`);
+    check((await p.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)) <= 0, "phone: no sideways scroll");
+    await shot(p, "6-phone-simd");
+    check(errs.length === 0, `phone: no errors in the browser console${errs.length ? ": " + errs.join(" | ") : ""}`);
+    // the slow build, as a browser without SIMD would get it
+    const q = await phone.newPage();
+    await q.goto(base + "/index.html?engine=scalar");
+    await q.waitForFunction(() => /Engine running|did not start/.test(document.getElementById("hw-engine").textContent), { timeout: 60000 });
+    check((await q.$eval("#hw-engine", (n) => n.dataset.build)) === "scalar" && /slow form/.test(await text(q, "#hw-engine")), `the build without SIMD starts and says it is slow ("${(await text(q, "#hw-engine")).slice(0, 90)}...")`);
+    // an engine file the browser refuses (as Safari refused the relaxed-SIMD file): the visitor is told in plain words
+    breakEngine = true;
+    const r = await (await browser.createBrowserContext()).newPage();
+    await r.goto(base + "/index.html");
+    await r.waitForFunction(() => /Engine running|did not start/.test(document.getElementById("hw-engine").textContent), { timeout: 60000 });
+    breakEngine = false;
+    const why = await r.$eval("#engine-error", (n) => (n.hidden ? "" : n.querySelector("#engine-error-why").textContent));
+    console.log(`     refused engine file: ${why} | ${await text(r, "#engine-error-detail")}`);
+    check(/could not load the engine's file/.test(why), "an engine file the browser refuses is explained in plain words, the details in small print");
+    await r.browserContext().close();
+    await q.close();
+    await phone.close();
+  }
 
   // a host that isolates the page (sandboxed frame without an origin): must either work or say why not
   const framed = await browser.newPage();

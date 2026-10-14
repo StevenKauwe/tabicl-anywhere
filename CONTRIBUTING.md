@@ -28,9 +28,10 @@ tools/build-site.sh                      # the web page in site/; tools/deploy-d
 ```
 cargo test --release                     # everything that runs on a CPU
 cargo test --release --features gpu      # also the graphics-card tests (skipped when there is no card)
-node tools/test-wasm.cjs                 # the WebAssembly engine under Node (after tools/build-wasm.sh)
+node tools/test-wasm.cjs [simd|relaxed|scalar]   # the WebAssembly engine under Node (after tools/build-wasm.sh)
 node tools/test-site.mjs                 # the web page's own logic under Node
 NODE_PATH=... node tools/test-browser.mjs   # the page in headless Chromium (see the file's header)
+python3 tools/test-webkit.py             # the page in WebKit, Safari's engine (needs WebKitGTK 4.1; see the file)
 ```
 
 Use `--release`: the tests run real models and are slow without optimisation.

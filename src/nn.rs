@@ -14,6 +14,19 @@ pub fn arch() -> pulp::Arch {
     *ARCH.get_or_init(pulp::Arch::new)
 }
 
+/// Run `job` compiled for the best instruction set this build may use.
+///
+/// A WebAssembly build made without SIMD is meant for browsers that have none, and a browser refuses the whole
+/// engine file if any function in it, even one never run, holds an instruction it does not know. So that build
+/// compiles only the plain path (pulp would otherwise also compile a SIMD path to choose at run time).
+#[inline(always)]
+pub fn dispatch<J: pulp::WithSimd>(job: J) -> J::Output {
+    #[cfg(all(target_arch = "wasm32", not(target_feature = "simd128")))]
+    return job.with_simd(pulp::Scalar::new());
+    #[cfg(not(all(target_arch = "wasm32", not(target_feature = "simd128"))))]
+    arch().dispatch(job)
+}
+
 /// Run a block of code compiled for the CPU's best instruction set. Captured variables are listed with their
 /// types (use the lifetime `'a` for borrows); inside, `$simd` is the token the kernels take.
 #[macro_export]
@@ -28,7 +41,7 @@ macro_rules! with_simd {
                 $body
             }
         }
-        $crate::nn::arch().dispatch(Job { $($v,)* _p: core::marker::PhantomData })
+        $crate::nn::dispatch(Job { $($v,)* _p: core::marker::PhantomData })
     }};
 }
 

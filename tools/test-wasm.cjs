@@ -4,8 +4,13 @@
 // Without them (as in CI) it uses the small committed data: the tiny model in tests/data (read straight from its
 // PyTorch checkpoint, exact comparison) and the real 16-bit weights in docs/weights on a small table. Build first
 // with tools/build-wasm.sh.
+//
+// Usage: node tools/test-wasm.cjs [simd|relaxed|scalar]     (which build of the engine; default simd)
 const fs = require("fs"), path = require("path");
-const { Weights, combineProba, defaultTemperature, toBundle, calibrate, memoryBytes } = require("../pkg/node/tabicl_anywhere_wasm.js");
+const build = process.argv[2] || "simd";
+if (!["simd", "relaxed", "scalar"].includes(build)) { console.error(`unknown build ${build}: simd, relaxed or scalar`); process.exit(2); }
+const { Weights, combineProba, defaultTemperature, toBundle, calibrate, memoryBytes } = require(`../pkg/node-${build}/tabicl_anywhere_wasm.js`);
+console.log(`engine build: ${build}`);
 const root = path.join(__dirname, "..");
 const fx = path.join(root, "fixtures"), small = path.join(root, "tests", "data");
 const full = fs.existsSync(path.join(fx, "classifier-v2.tirs"));

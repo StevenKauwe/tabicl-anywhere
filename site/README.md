@@ -12,11 +12,19 @@ browser. No server, no framework, no build step for the page itself.
 | `app.js` | 69 KB | the page's logic (one module) |
 | `worker.js` | 10 KB | one engine on a background thread; the page starts several, and one more for the graphics card |
 | `pkg/tabicl_anywhere_wasm.js` | 75 KB | glue for the engine (generated) |
-| `pkg/tabicl_anywhere_wasm_bg.wasm` | 2.36 MB (0.55 MB compressed in transit) | the engine, graphics-card code included (generated) |
+| `pkg/tabicl_anywhere_wasm_relaxed.wasm` | 2.23 MB (0.56 MB compressed) | the engine with relaxed SIMD, for browsers that accept it: Chrome and Edge among others (generated) |
+| `pkg/tabicl_anywhere_wasm_bg.wasm` | 1.85 MB (0.51 MB compressed) | the engine with plain SIMD, for Safari and so every browser on iPhone and iPad (generated) |
+| `pkg/tabicl_anywhere_wasm_scalar.wasm` | 1.39 MB (0.40 MB compressed) | the engine without SIMD, for browsers from before about 2023; 3 times slower (generated) |
 | `weights/classifier-v2-half.json` + `.00.bin` ... `.03.bin` | 55.3 MB in 4 parts | the classification model, 16-bit, each part at most 14 MB |
 | `weights/regressor-v2-half.json` + `.00.bin` ... `.03.bin` | 57.3 MB in 4 parts | the number-prediction model, likewise |
 | `weights/LICENSE-TabICL.txt` | 2 KB | the licence the weights are redistributed under (also shown in the page footer) |
 | `.nojekyll` | 0 | tells GitHub Pages to serve the folder as it is |
+
+Each browser downloads only one of the three engine files: the worker asks the browser (with
+`WebAssembly.validate` on two tiny test modules) which instructions it accepts, because a browser refuses a whole
+engine file over one instruction it does not know. `?engine=relaxed`, `simd` or `scalar` in the address forces one.
+On a phone or tablet that does not report its memory (every iPhone and iPad) the page plans for 1 GB and so runs
+at most two workers at a time.
 
 A visitor downloads about 2.5 MB to see the page, then 55.3 MB the first time they fit a category model, and
 57.3 MB more only if they ever predict a number. Both are kept in their browser afterwards.
@@ -69,6 +77,8 @@ app.js
 worker.js
 pkg/tabicl_anywhere_wasm.js
 pkg/tabicl_anywhere_wasm_bg.wasm
+pkg/tabicl_anywhere_wasm_relaxed.wasm
+pkg/tabicl_anywhere_wasm_scalar.wasm
 weights/classifier-v2-half.json
 weights/classifier-v2-half.00.bin   weights/classifier-v2-half.01.bin
 weights/classifier-v2-half.02.bin   weights/classifier-v2-half.03.bin
@@ -137,9 +147,10 @@ page says which).
 ## Tests
 
 ```
-node tools/test-wasm.cjs       # engine against the reference; one-member path = whole-ensemble path; half weights
+node tools/test-wasm.cjs [simd|relaxed|scalar]   # engine against the reference; one-member path = whole-ensemble path; half weights
 node tools/test-site.mjs       # the page's own logic under Node: estimates, weight parts, CSV path, worker pool
 node tools/test-browser.mjs    # the real page in headless Chromium (needs puppeteer-core; see the file's header)
+python3 tools/test-webkit.py   # the real page in WebKit (Safari's engine), via WebKitGTK, with a phone's user agent
 node tools/test-card-browser.mjs --ui   # card against processor in a Chromium window (the real card), fits and
                                         # predictions compared, times printed; --headless for the software stand-in
 ```

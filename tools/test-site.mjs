@@ -53,6 +53,26 @@ function csvOf(x, y, rows, features) {
 check(app.levels(2) === 1 && app.levels(10) === 1 && app.levels(11) === 2 && app.levels(100) === 2 && app.levels(101) === 3, "levels(): one step up to 10 classes, two up to 100");
 check(app.planWorkers({ members: 8, cores: 16, deviceMemoryGB: 8 }) === 8 && app.planWorkers({ members: 8, cores: 4, deviceMemoryGB: 8 }) === 3 && app.planWorkers({ members: 8, cores: 16, deviceMemoryGB: 1 }) === 2 && app.planWorkers({ members: 1, cores: 16 }) === 1, "planWorkers(): bounded by members, processor threads and memory");
 {
+  const iphone = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/141.0 Mobile/15E148 Safari/604.1";
+  const g = (o) => app.deviceMemoryGuess(o);
+  check(g({ deviceMemory: 8 }) === 8 && g({ userAgent: iphone }) === 1 && g({ userAgent: "Macintosh", platform: "MacIntel", maxTouchPoints: 5 }) === 1 && g({ userAgent: "Macintosh", platform: "MacIntel" }) === 4 && g({ mobile: true }) === 1, "deviceMemoryGuess(): what the browser reports; else 1 GB on a phone or tablet (an iPad calling itself a Mac), 4 GB otherwise");
+  const small = app.estimate({ rows: 150, features: 4, classes: 3, members: 8, workers: 1, rate: 5e9 });
+  const mid = app.estimate({ rows: 2000, features: 20, classes: 3, members: 8, workers: 1, rate: 5e9 });
+  const onPhone = (e) => app.planWorkers({ members: 8, cores: 6, deviceMemoryGB: g({ userAgent: iphone }), perWorkerBytes: e.perWorkerBytes });
+  check(onPhone(small) === 2 && onPhone(mid) === 1, `on an iPhone: 2 workers for the example table (${app.formatBytes(small.perWorkerBytes)} each), 1 for 2000 x 20 (${app.formatBytes(mid.perWorkerBytes)})`);
+}
+{
+  // The engine's builds: the browser's own WebAssembly.validate is asked about tiny test modules. Node accepts
+  // all three; Safari refuses relaxed SIMD (stood in for here by refusing the relaxed module's bytes).
+  check(JSON.stringify(worker.usableBuilds()) === '["relaxed","simd","scalar"]', "the engine build probes: this Node accepts relaxed SIMD, SIMD and the plain module");
+  const noRelaxed = (b) => b !== worker.PROBES.relaxed && WebAssembly.validate(b);
+  const noSimd = (b) => b === worker.PROBES.scalar;
+  check(worker.usableBuilds(noRelaxed)[0] === "simd" && worker.usableBuilds(noSimd)[0] === "scalar" && worker.usableBuilds(() => false).length === 0, "a browser without relaxed SIMD (Safari) gets the simd build, one without SIMD the scalar build");
+  for (const [name, file] of Object.entries(worker.BUILDS)) check(fs.existsSync(path.join(root, "site/pkg", file)), `site/pkg holds the ${name} build (${file})`);
+  const safari = "the engine file could not be loaded (WebAssembly.Module doesn't parse at byte 1359: relaxed simd instructions not supported, in function at index 4)";
+  check(/could not load the engine's file/.test(app.engineTrouble(safari)) && /too old/.test(app.engineTrouble("the engine file could not be loaded (this browser accepts none of the engine's builds: it is too old for WebAssembly as this page uses it)")) && /out of memory/.test(app.engineTrouble("RangeError: Out of memory")), "the engine's start-up failures are explained in plain words");
+}
+{
   const huge = app.estimate({ rows: 200000, features: 100, members: 1, workers: 1, rate: 5e9 });
   const fine = app.estimate({ rows: 500, features: 100, classes: 3, members: 4, workers: 4, rate: 5e9 });
   check(!!huge.refuse && !fine.refuse, `estimate(): refuses what cannot fit in 4 GB (200,000 x 100 needs ${app.formatBytes(huge.perWorkerBytes)}), allows 500 x 100`);

@@ -79,9 +79,9 @@ jobs:
       - name: Build the engine for the browser and for Node
         run: tools/build-wasm.sh
       - name: The committed page runs the same engine that was just built
-        run: cmp site/pkg/tabicl_anywhere_wasm_bg.wasm docs/pkg/tabicl_anywhere_wasm_bg.wasm || echo "::warning::docs/pkg is not the engine built from this commit; run tools/deploy-docs.sh"
-      - name: Engine against the reference, under Node
-        run: node tools/test-wasm.cjs
+        run: for f in site/pkg/*.wasm; do cmp "$f" "docs/pkg/${f##*/}" || echo "::warning::docs/pkg is not the engine built from this commit; run tools/deploy-docs.sh"; done
+      - name: Engine against the reference, under Node (each of the three builds)
+        run: for b in simd relaxed scalar; do node tools/test-wasm.cjs $b; done
       - name: The page's own logic, under Node
         run: |
           cargo build --release

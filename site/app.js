@@ -60,6 +60,20 @@ export function planWorkers({ members, cores = 4, deviceMemoryGB = 4, perWorkerB
   return Math.max(1, Math.min(members, byCores, byMemory));
 }
 
+/**
+ * How much memory to plan for when the browser does not say (`navigator.deviceMemory` is Chrome's alone, and
+ * capped at 8). Phones and tablets get 1 GB: Safari, which every browser on an iPhone or iPad is underneath,
+ * closes a tab that uses much more than a gigabyte or two, and gives no warning first. With 1 GB `planWorkers`
+ * runs two workers (each holds about 170 MB of weights plus the table's own share) for tables up to about
+ * 1000 x 20, and one for bigger ones, instead of one per processor thread.
+ */
+export function deviceMemoryGuess({ deviceMemory, userAgent = "", platform = "", maxTouchPoints = 0, mobile = false } = {}) {
+  if (deviceMemory > 0) return deviceMemory;
+  // (an iPad asks for desktop pages and calls itself a Mac; a Mac has no touch screen)
+  const handheld = mobile || /iPhone|iPad|iPod|Android|Mobile/i.test(userAgent) || (/Mac/.test(platform) && maxTouchPoints > 1);
+  return handheld ? 1 : 4;
+}
+
 /** Running several workers at once slows each a little (they share memory bandwidth and processor cache). */
 export const crowding = (workers) => 1 + 0.06 * (workers - 1);
 
@@ -361,6 +375,16 @@ export async function sweep(store, catalogue, now = Date.now()) {
 
 export class EngineError extends Error {}
 
+/** What to tell a visitor (not a programmer) when the engine would not start, from the technical `detail`. */
+export function engineTrouble(detail) {
+  const d = String(detail);
+  if (/no WebAssembly|none of the engine's builds|too old/i.test(d)) return "This browser is too old to run it. Updating the browser should fix this; on an iPhone or iPad, update iOS (Settings, General, Software Update), because every browser there is Safari underneath.";
+  if (/memory|allocation|RangeError/i.test(d)) return "The device ran out of memory while starting it. Close other tabs or apps and reload the page.";
+  if (/CompileError|could not be loaded|doesn't parse|not supported|invalid|magic|failed to fetch|NetworkError|404/i.test(d)) return "This browser could not load the engine's file. Reloading the page may help; if it keeps happening, try updating the browser, or another one (on an iPhone or iPad, updating iOS).";
+  if (/did not start within/i.test(d)) return "It took too long to start. Reloading the page usually helps.";
+  return "This page needs WebAssembly and background workers, loaded from the files published next to it. Try a current version of Chrome, Edge, Firefox or Safari, and if this page is shown inside another site or app, open it directly in the browser.";
+}
+
 /**
  * A set of workers, each one engine. `makeWorker()` returns something with `postMessage`, `terminate` and
  * settable `onmessage` / `onerror` (a Web Worker). Starting a worker that never answers fails after
@@ -398,6 +422,7 @@ export class Engine {
       if (m.ok) return p.resolve(m.result);
       const err = new EngineError(m.error);
       err.fatal = !!m.fatal;
+      err.boot = !!m.boot; // the engine file itself would not load
       err.card = !!m.card || (m.fatal && rec === this.card);
       p.reject(err);
       if (m.fatal) fail(m.error);
@@ -727,7 +752,8 @@ function startPage() {
   const weightsBase = app.dataset.weights || "weights/";
   const framed = (() => { try { return window.self !== window.top; } catch { return true; } })();
   const cores = navigator.hardwareConcurrency || 4;
-  const deviceMemoryGB = navigator.deviceMemory || 4;
+  const deviceMemoryGB = deviceMemoryGuess({ deviceMemory: navigator.deviceMemory, userAgent: navigator.userAgent, platform: navigator.platform, maxTouchPoints: navigator.maxTouchPoints, mobile: !!(navigator.userAgentData && navigator.userAgentData.mobile) });
+  const handheld = !navigator.deviceMemory && deviceMemoryGB < 4; // memory guessed low: a phone or tablet
 
   const state = {
     store: null, catalogue: { weights: {}, models: [] }, engine: null, rate: 0, adjust: local.get("adjust", 1), adjustCard: local.get("adjustCard", 1),
@@ -744,6 +770,9 @@ function startPage() {
   let way = 0;
   function makeWorker() {
     const url = new URL("worker.js", import.meta.url);
+    // (?engine=relaxed, simd or scalar in the address forces that build of the engine, to try each one out)
+    const forced = new URLSearchParams(location.search).get("engine");
+    if (forced) url.searchParams.set("engine", forced);
     if (WAYS[way] === "file") return new Worker(url, { type: "module" });
     if (WAYS[way] === "blob") {
       const blob = new Blob([`import ${JSON.stringify(url.href)};`], { type: "text/javascript" });
@@ -764,7 +793,8 @@ function startPage() {
 
   function engineFailed(e) {
     $("engine-error").hidden = false;
-    $("engine-error-detail").textContent = e.message || String(e);
+    $("engine-error-why").textContent = engineTrouble(e.message || String(e));
+    $("engine-error-detail").textContent = `(Details, for whoever looks after this page: ${e.message || String(e)})`;
     say($("hw-engine"), "The prediction engine did not start.", "bad");
     for (const b of document.querySelectorAll("[data-needs-engine]")) b.disabled = true;
   }
@@ -781,14 +811,19 @@ function startPage() {
         break;
       } catch (e) {
         tried.push(e.message);
+        // the worker started but the engine file would not load: another way of starting workers will not help
+        if (e.boot) { way = 0; throw new EngineError(tried.join("; then: ")); }
         if (way + 1 >= WAYS.length) { way = 0; throw new EngineError(tried.join("; then: ")); }
         way++; // remembered: later workers start the way that worked
       }
     }
     state.rate = first.hello.rate;
+    state.build = first.hello.build;
+    $("hw-engine").dataset.build = state.build || "";
     const speed = `measured speed ${(state.rate / 1e9).toFixed(1)} billion operations a second per thread`;
     if (inPage()) say($("hw-engine"), `Engine running on the processor, inside the page: this host does not allow background workers, so one processor thread is used and the page will not respond while it is fitting or predicting (${speed}).`, "warn");
-    else say($("hw-engine"), `Engine running on the processor: ${cores} processor thread${cores === 1 ? "" : "s"} available, ${speed}.`, "ok");
+    else if (state.build === "scalar") say($("hw-engine"), `Engine running on the processor, in its slow form: this browser lacks the fast arithmetic (SIMD) the engine normally uses, so everything takes about three times longer. Updating the browser fixes that (${cores} processor thread${cores === 1 ? "" : "s"}, ${speed}).`, "warn");
+    else say($("hw-engine"), `Engine running on the processor: ${cores} processor thread${cores === 1 ? "" : "s"} available${handheld ? " (on a phone or tablet the page uses at most two at a time, to stay within the memory the browser allows a page)" : ""}, ${speed}.`, "ok");
   }
 
   // The graphics card: a worker of its own holding the browser's WebGPU device. state.card is null until it
@@ -813,7 +848,8 @@ function startPage() {
       // (and ?card-fail makes the card's first job fail as if the card had been lost)
       const query = new URLSearchParams(location.search);
       const limitMB = Number(query.get("card-work-mb")) || 0;
-      const rec = await state.engine.openCard({ workMB: 768, modelsMB: 1024, calibrateMs: 300, limitMB, failNext: query.has("card-fail") });
+      // (a phone's graphics memory is its main memory, which Safari allows a page little of)
+      const rec = await state.engine.openCard({ workMB: handheld ? 256 : 768, modelsMB: handheld ? 256 : 1024, calibrateMs: 300, limitMB, failNext: query.has("card-fail") });
       const info = rec.info;
       state.card = { name: cardName(info), software: info.software, rate: info.rate };
       const speed = `measured speed ${(info.rate / 1e9).toFixed(info.rate < 1e10 ? 1 : 0)} billion operations a second`;
@@ -1025,7 +1061,7 @@ function startPage() {
     if (kind === "classifier" && target.distinct < 2) problems.push("The column to predict has only one value, so there is nothing to learn.");
     if (kind === "classifier" && target.distinct > table.rows / 2 && target.distinct > 10) problems.push(`The column to predict has ${target.distinct} different values in ${table.rows} rows. If it is a number, choose "A number" below; if it is an identifier, pick another column.`);
     if (target.missing > 0) problems.push(`The column to predict has ${target.missing} empty cell${target.missing === 1 ? "" : "s"}; remove those rows first.`);
-    if (est.memoryBytes > deviceMemoryGB * 1e9 * 0.75 && !est.refuse) problems.push(`That is a lot of memory for this device${navigator.deviceMemory ? ` (the browser reports about ${deviceMemoryGB} GB)` : ""}. Fewer members or fewer rows will need less.`);
+    if (est.memoryBytes > deviceMemoryGB * 1e9 * 0.75 && !est.refuse) problems.push(`That is a lot of memory for this device${navigator.deviceMemory ? ` (the browser reports about ${deviceMemoryGB} GB)` : handheld ? " (a phone or tablet allows a web page far less memory than a computer does, and may close the tab)" : ""}. Fewer members or fewer rows will need less.`);
     if (state.quotaLeft != null && est.storageBytes > state.quotaLeft) problems.push(`The browser has only about ${formatBytes(state.quotaLeft)} of storage left for this site, less than the fitted model needs. Delete a stored model first, or choose fewer members.`);
     if (est.refuse) problems.unshift(est.refuse);
     $("estimate").replaceChildren(...lines.map((t) => el("p", {}, t)));

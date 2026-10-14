@@ -11,14 +11,16 @@ cd "$(dirname "$0")/.."
 if [ "$1" = "--no-build" ]; then shift; else sh tools/build-site.sh "$@"; fi
 
 for f in site/index.html site/page.html site/app.js site/worker.js \
-         site/pkg/tabicl_anywhere_wasm.js site/pkg/tabicl_anywhere_wasm_bg.wasm site/weights/LICENSE-TabICL.txt; do
+         site/pkg/tabicl_anywhere_wasm.js site/pkg/tabicl_anywhere_wasm_bg.wasm site/pkg/tabicl_anywhere_wasm_relaxed.wasm \
+         site/pkg/tabicl_anywhere_wasm_scalar.wasm site/weights/LICENSE-TabICL.txt; do
   [ -f "$f" ] || { echo "missing $f" >&2; exit 1; }
 done
 
 mkdir -p docs/pkg docs/weights
 for f in index.html page.html app.js worker.js; do cp site/$f docs/$f; done
 rm -f docs/pkg/*
-cp site/pkg/tabicl_anywhere_wasm.js site/pkg/tabicl_anywhere_wasm_bg.wasm docs/pkg/
+# one glue file and the engine's three builds (a visitor's browser downloads only one of them; site/worker.js)
+cp site/pkg/tabicl_anywhere_wasm.js site/pkg/tabicl_anywhere_wasm_bg.wasm site/pkg/tabicl_anywhere_wasm_relaxed.wasm site/pkg/tabicl_anywhere_wasm_scalar.wasm docs/pkg/
 cp site/weights/LICENSE-TabICL.txt docs/weights/
 for kind in classifier regressor; do
   if ls site/weights/$kind-v2-half.*.bin >/dev/null 2>&1; then

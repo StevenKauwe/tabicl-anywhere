@@ -15,14 +15,68 @@
 import init, * as engine from "./pkg/tabicl_anywhere_wasm.js";
 
 let started = null;
+let build = null; // which of BUILDS is running
 const held = {}; // "classifier" | "regressor" -> Weights
 let card = null; // the engine's Card, once a `card` request has opened one
 let pretendFailure = false; // for trying out the page's fallback: the next card job fails as a lost card would
 
-/** Start the engine once. `source` (optional) is the .wasm as bytes, a URL or a Response; the default is the file next to the script. */
+// The engine comes in three builds of the same code (tools/build-wasm.sh), fastest first. A browser refuses a
+// whole engine file if it holds even one instruction the browser does not know, so the build is chosen before
+// anything is downloaded, by asking the browser whether it accepts two tiny test modules: one with an
+// instruction from "relaxed SIMD" (Chrome and Edge among others; not Safari, so no browser on an iPhone or iPad), one
+// with an instruction from plain SIMD (every current browser; Safari since iOS 16.4 and macOS 13.3). Only the
+// chosen file is downloaded (the workers share it through the browser's cache).
+export const BUILDS = {
+  relaxed: "tabicl_anywhere_wasm_relaxed.wasm", // fused multiply-add: about 15% quicker to fit
+  simd: "tabicl_anywhere_wasm_bg.wasm", // four numbers at a time
+  scalar: "tabicl_anywhere_wasm_scalar.wasm", // one number at a time: about 3 times slower, for old browsers
+};
+const v128zero = [0xfd, 0x0c, ...new Array(16).fill(0)]; // v128.const 0
+/** A module with one function, `() -> ()`, whose body (after its empty list of locals) is `code`. */
+function probe(code) {
+  const body = [0x00, ...code, 0x0b];
+  return new Uint8Array([0x00, 0x61, 0x73, 0x6d, 1, 0, 0, 0, 1, 4, 1, 0x60, 0, 0, 3, 2, 1, 0, 0x0a, body.length + 2, 1, body.length, ...body]);
+}
+export const PROBES = {
+  relaxed: probe([...v128zero, ...v128zero, ...v128zero, 0xfd, 0x85, 0x02, 0x1a]), // f32x4.relaxed_madd; drop
+  simd: probe([...v128zero, 0x1a]), // v128.const; drop
+  scalar: probe([]),
+};
+
+/** The builds this browser accepts, fastest first. `validate` stands in for WebAssembly.validate in tests. */
+export function usableBuilds(validate = (b) => WebAssembly.validate(b)) {
+  return Object.keys(BUILDS).filter((name) => {
+    try { return validate(PROBES[name]); } catch { return false; }
+  });
+}
+
+/**
+ * Start the engine once. `source` (optional) is the .wasm as bytes, a URL or a Response (tests pass one);
+ * otherwise the fastest build this browser accepts is loaded from ./pkg/. `engine=relaxed|simd|scalar` in the
+ * address of this script forces one build (the page passes on its own `?engine=`, for trying them out).
+ */
 export function boot(source) {
-  if (!started) started = source ? init({ module_or_path: source }) : init();
+  if (!started) started = source ? init({ module_or_path: source }).then(() => { build = "given"; }) : bootBest();
   return started;
+}
+
+async function bootBest() {
+  let forced = null;
+  try { forced = new URL(import.meta.url).searchParams.get("engine"); } catch { /* no address */ }
+  const list = forced && BUILDS[forced] ? [forced] : usableBuilds();
+  if (!list.length) throw new Error("this browser accepts none of the engine's builds: it is too old for WebAssembly as this page uses it");
+  const tried = [];
+  // normally the first works; the others are a safety net (each is only fetched if the one before failed)
+  for (const name of list) {
+    try {
+      await init({ module_or_path: new URL(`./pkg/${BUILDS[name]}`, import.meta.url) });
+      build = name;
+      return;
+    } catch (e) {
+      tried.push(`${name} build: ${e && e.message ? e.message : e}`);
+    }
+  }
+  throw new Error(tried.join("; "));
 }
 
 const mem = () => engine.memoryBytes();
@@ -41,7 +95,7 @@ const ops = {
     // briefly using the processor cannot drag the figure down.
     let rate = 0;
     for (let i = 0; i < 16 && calibrateMs > 0; i++) rate = Math.max(rate, engine.calibrate(calibrateMs / 16));
-    return { result: { rate, mem: mem() } };
+    return { result: { rate, mem: mem(), build } };
   },
 
   /** Open the graphics card (once) and measure it. Fails where the browser offers no WebGPU or no usable card. */
@@ -168,7 +222,7 @@ export async function handle(msg, wasmSource) {
   try {
     await boot(wasmSource);
   } catch (e) {
-    return { id: msg.id, ok: false, fatal: true, error: `the engine file could not be loaded (${e && e.message ? e.message : e})` };
+    return { id: msg.id, ok: false, fatal: true, boot: true, error: `the engine file could not be loaded (${e && e.message ? e.message : e})` };
   }
   try {
     const op = ops[msg.op];
