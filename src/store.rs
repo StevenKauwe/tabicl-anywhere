@@ -65,7 +65,7 @@ pub fn file_read_at(f: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
             done += n;
             at += n as u64;
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -83,10 +83,13 @@ pub fn file_write_at(f: &File, data: &[u8], offset: u64) -> io::Result<()> {
         let (mut done, mut at) = (0, offset);
         while done < data.len() {
             let n = std::os::windows::fs::FileExt::seek_write(f, &data[done..], at)?;
+            if n == 0 {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
             done += n;
             at += n as u64;
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(any(unix, windows)))]
     {
