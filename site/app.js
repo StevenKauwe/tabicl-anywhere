@@ -640,6 +640,65 @@ export function resultsCsv(model, result, rows) {
 }
 
 // =====================================================================================================
+// The example table, and rows to try predicting
+// =====================================================================================================
+
+/** Split CSV text into rows of fields the way the engine does (src/csv.rs): quotes with doubled quotes inside, newlines in quotes. */
+export function parseCsv(text) {
+  const rows = [];
+  let row = [], field = "", quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"' && quoted && text[i + 1] === '"') { field += '"'; i++; }
+    else if (c === '"') quoted = !quoted;
+    else if (c === "," && !quoted) { row.push(field); field = ""; }
+    else if (c === "\n" && !quoted) { row.push(field); rows.push(row); row = []; field = ""; }
+    else if (c !== "\r" || quoted) field += c;
+  }
+  if (field || row.length) { row.push(field); rows.push(row); }
+  return rows.filter((r) => !(r.length === 1 && r[0] === ""));
+}
+
+export const SEEDLING_COLUMNS = ["light_hours", "water_ml", "soil", "temperature_c", "outcome"];
+
+/** One invented seedling, as the fields of SEEDLING_COLUMNS; `rnd()` gives numbers from 0 to 1. About 1 in 25 has no water amount. */
+export function seedling(rnd) {
+  const soils = ["clay", "loam", "sand"];
+  const light = 4 + rnd() * 10, water = 20 + rnd() * 180, soil = soils[Math.floor(rnd() * 3)], temp = 12 + rnd() * 18;
+  const score = (light - 4) / 10 + (1 - Math.abs(water - 110) / 110) + (soil === "loam" ? 0.5 : soil === "sand" ? 0.1 : 0.25) + (1 - Math.abs(temp - 22) / 12) + (rnd() - 0.5) * 0.6;
+  const outcome = score > 2.25 ? "thrived" : score > 1.6 ? "survived" : "died";
+  return [light.toFixed(1), rnd() < 0.04 ? "" : water.toFixed(0), soil, temp.toFixed(1), outcome];
+}
+
+/** The example table: an invented one, clearly labelled as an example in the page; always the same 150 seedlings. */
+export function sampleCsv() {
+  let s = 20260212;
+  const rnd = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
+  const lines = [SEEDLING_COLUMNS.join(",")];
+  for (let i = 0; i < 150; i++) lines.push(seedling(rnd).join(","));
+  return lines.join("\n") + "\n";
+}
+
+/** `n` of `rows`, picked at random, none twice (all of them, shuffled, if there are not that many). */
+export function pickRows(rows, n, rnd = Math.random) {
+  const a = rows.slice();
+  for (let i = 0; i < Math.min(n, a.length); i++) {
+    const j = i + Math.floor(rnd() * (a.length - i));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a.slice(0, n);
+}
+
+/**
+ * Rows to predict as CSV: `header` and `rows` (fields in header order) without column `target`.
+ * Returns `{ text, actual }`, `actual` being each row's value of the left-out column.
+ */
+export function rowsToPredict(header, rows, target) {
+  const keep = (r) => header.map((_, j) => r[j] ?? "").filter((_, j) => j !== target).map(csvCell).join(",");
+  return { text: [keep(header), ...rows.map(keep)].join("\n") + "\n", actual: rows.map((r) => r[target] ?? "") };
+}
+
+// =====================================================================================================
 // The page
 // =====================================================================================================
 
@@ -879,21 +938,6 @@ function startPage() {
 
   // ---- the training table -------------------------------------------------------------------------------
 
-  function sampleCsv() {
-    // An invented table, clearly labelled as an example in the page: seedlings grown under different conditions.
-    let s = 20260212;
-    const rnd = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
-    const soils = ["clay", "loam", "sand"];
-    const lines = ["light_hours,water_ml,soil,temperature_c,outcome"];
-    for (let i = 0; i < 150; i++) {
-      const light = 4 + rnd() * 10, water = 20 + rnd() * 180, soil = soils[Math.floor(rnd() * 3)], temp = 12 + rnd() * 18;
-      const score = (light - 4) / 10 + (1 - Math.abs(water - 110) / 110) + (soil === "loam" ? 0.5 : soil === "sand" ? 0.1 : 0.25) + (1 - Math.abs(temp - 22) / 12) + (rnd() - 0.5) * 0.6;
-      const outcome = score > 2.25 ? "thrived" : score > 1.6 ? "survived" : "died";
-      lines.push(`${light.toFixed(1)},${rnd() < 0.04 ? "" : water.toFixed(0)},${soil},${temp.toFixed(1)},${outcome}`);
-    }
-    return lines.join("\n") + "\n";
-  }
-
   async function useCsv(text, name, isExample = false) {
     say($("table-error"), "");
     try {
@@ -901,7 +945,8 @@ function startPage() {
       const info = await state.engine.call(await state.engine.first(), "describe", { text });
       if (info.columns.length < 2) throw new Error("the table needs at least two columns: one to predict and one to predict it from");
       if (info.rows < 2) throw new Error("the table needs a header row and at least two rows of data");
-      Object.assign(state, { csv: text, csvName: name, info, membersTouched: false });
+      Object.assign(state, { csv: text, csvName: name, info, isExample, membersTouched: false });
+      $("add-examples").disabled = false;
       $("table-name").textContent = `${name}${isExample ? " (an invented example, not your data)" : ""}: ${info.rows.toLocaleString()} rows, ${info.columns.length} columns`;
       const body = $("columns-body");
       body.replaceChildren(...info.columns.map((c) => el("tr", {},
@@ -933,6 +978,7 @@ function startPage() {
     const kind = numberOk && c.distinct > 10 ? "regressor" : "classifier";
     $(`kind-${kind}`).checked = true;
     state.membersTouched = false;
+    say($("examples-note"), "");
     refreshEstimate();
   }
 
@@ -1157,6 +1203,31 @@ function startPage() {
 
   // ---- predicting ---------------------------------------------------------------------------------------
 
+  /**
+   * Fill the new-rows box with example rows for the current table and column to predict (replacing what is
+   * there): fresh invented seedlings for the example table, rows picked from the table otherwise. Their true
+   * answers are kept, to show beside the predictions while the box is left as it was filled.
+   */
+  function addExamples() {
+    const box = $("example-count");
+    const n = Math.min(500, Math.max(1, Math.round(Number(box.value)) || 5));
+    box.value = String(n);
+    const target = Number($("target").value), name = state.info.columns[target].name;
+    let header = SEEDLING_COLUMNS, rows;
+    if (state.isExample) rows = Array.from({ length: n }, () => seedling(Math.random));
+    else {
+      [header, ...rows] = parseCsv(state.csv);
+      rows = pickRows(rows, n);
+    }
+    const { text, actual } = rowsToPredict(header, rows, target);
+    $("new-rows").value = text;
+    state.examples = { text, actual, target: name };
+    const s = rows.length === 1 ? "" : "s";
+    say($("examples-note"), state.isExample
+      ? `Filled in ${rows.length} new invented row${s}, without "${name}". When you predict "${name}", the true answers are shown beside the model's.`
+      : `Filled in ${rows.length} row${s} taken from your own table${rows.length < n ? " (all it has)" : ""}, without "${name}". The model learns from these same rows, so its answers on them will look better than on rows it has never seen.`);
+  }
+
   async function predict() {
     const m = chosenModel();
     const text = $("new-rows").value;
@@ -1178,7 +1249,10 @@ function startPage() {
       const useCard = cardForPrediction({ choice: $("device").value, card: state.card, trainRows: m.rows, features: m.features, rows });
       const where = useCard ? "on the graphics card" : "on the processor";
       const result = await predictModel(state.engine, state.store, { model: m, weightsBlob, x, rows, workers, card: useCard, onCardTrouble: cardTrouble, onProgress: (p) => say(status, `Predicting ${rows.toLocaleString()} row${rows === 1 ? "" : "s"} ${where}: ${p.done} of ${p.members} members have answered.`) });
-      state.lastResult = { model: m, result, rows, csv: resultsCsv(m, result, rows) };
+      // the true answers, if these are the example rows as filled in, for the column this model predicts
+      const ex = state.examples;
+      const actual = ex && ex.text === text && ex.target === m.target && ex.actual.length === rows ? ex.actual : null;
+      state.lastResult = { model: m, result, rows, actual, csv: resultsCsv(m, result, rows) };
       showResults();
       const st = result.stats;
       const how = !useCard ? " on the processor"
@@ -1197,7 +1271,7 @@ function startPage() {
   }
 
   function showResults() {
-    const { model, result, rows } = state.lastResult;
+    const { model, result, rows, actual } = state.lastResult;
     const shown = Math.min(rows, 200);
     const fmt = (v) => (Math.abs(v) >= 1e6 || (v !== 0 && Math.abs(v) < 1e-3) ? v.toExponential(3) : Number(v.toPrecision(5)).toString());
     let head, body = [];
@@ -1214,9 +1288,12 @@ function startPage() {
         body.push([String(r + 1), model.labels[order[0]], ...(wide ? p.map(pct) : [pct(p[order[0]]), model.labels[order[1]], pct(p[order[1]])])]);
       }
     }
+    // the true answers of example rows go last, on screen only (the CSV keeps the command line's columns)
+    if (actual) { head.push("Actual"); body.forEach((cells, r) => cells.push(actual[r])); }
+    const last = head.length - 1;
     $("results-head").replaceChildren(el("tr", {}, head.map((t) => el("th", { scope: "col" }, t))));
-    $("results-body").replaceChildren(...body.map((cells) => el("tr", {}, cells.map((t, i) => el("td", { class: i === 1 && model.kind !== "regressor" ? "" : "num" }, t)))));
-    $("results-note").textContent = `${rows > shown ? `Showing the first ${shown} of ${rows.toLocaleString()} rows; copying gives all of them. ` : ""}${model.kind === "regressor" ? "Low and high mark the range the model expects 9 times out of 10." : ""}`;
+    $("results-body").replaceChildren(...body.map((cells) => el("tr", {}, cells.map((t, i) => el("td", { class: model.kind !== "regressor" && (i === 1 || (actual && i === last)) ? "" : "num" }, t)))));
+    $("results-note").textContent = `${rows > shown ? `Showing the first ${shown} of ${rows.toLocaleString()} rows; copying gives all of them. ` : ""}${model.kind === "regressor" ? "Low and high mark the range the model expects 9 times out of 10. " : ""}${actual ? "Actual is the true answer for these example rows." : ""}`.trim();
     $("results-csv").value = state.lastResult.csv;
     $("results-csv-wrap").hidden = true;
     $("download").hidden = framed;
@@ -1264,6 +1341,7 @@ function startPage() {
   $("fit").addEventListener("click", fit);
   $("cancel").addEventListener("click", cancel);
   $("predict").addEventListener("click", predict);
+  $("add-examples").addEventListener("click", addExamples);
   $("copy").addEventListener("click", copyCsv);
   $("download").addEventListener("click", download);
   $("rows-file").addEventListener("change", (ev) => readFile(ev.target.files[0], (text) => { $("new-rows").value = text; }));

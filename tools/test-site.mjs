@@ -129,6 +129,18 @@ check(await ask("describe", { text: "a,b\n1\n" }).then(() => false, (e) => /row 
   const { x } = await ask("features", { schema: entry.schema, text: fresh });
   const res = await app.predictModel(direct, store, { model: entry, weightsBlob: weightBlobs.classifier, x, rows: 25 });
   const pageCsv = app.resultsCsv(entry, res, 25);
+  {
+    // "Fill in example rows" on a visitor's own table: rows picked from it, the target left out, quoting kept
+    const [head, ...all] = app.parseCsv(train);
+    const picked = app.pickRows(all, 7);
+    const { text, actual } = app.rowsToPredict(head, picked, 4);
+    const back = app.parseCsv(text);
+    const { x: px } = await ask("features", { schema: entry.schema, text });
+    check(head.length === 5 && all.length === 160 && back[0].join() === "size,colour,weight,note" && back.length === 8 && back.slice(1).every((r, i) => r.join() === picked[i].slice(0, 4).join()) && actual.every((a, i) => a === picked[i][4]) && px.length === 7 * entry.features,
+      "example rows from a visitor's table: 7 rows, header without the target, quoted commas and empty cells survive, the engine reads them");
+    const lines = app.sampleCsv().trim().split("\n"), fresh7 = Array.from({ length: 7 }, () => app.seedling(Math.random));
+    check(lines.length === 151 && lines[0] === app.SEEDLING_COLUMNS.join(",") && fresh7.every((r) => r.length === 5 && /^(thrived|survived|died)$/.test(r[4])), "the example table and fresh example rows come from the same generator");
+  }
   const bin = path.resolve(root, process.env.CARGO_TARGET_DIR || "target", "release/tabicl-anywhere");
   if (fs.existsSync(bin)) {
     const dir = fs.mkdtempSync(path.join(scratch, "site-test-"));

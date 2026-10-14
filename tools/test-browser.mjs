@@ -96,12 +96,39 @@ try {
   check(!(await page.$eval("#download", (b) => b.hidden)), "outside a frame the download button is offered as an extra");
   await shot(page, "3-results-desktop-light");
 
+  // "Fill in example rows": fresh invented seedlings without the column to predict, their true answers shown
+  const fillIn = async (n) => {
+    await page.$eval("#example-count", (b, v) => { b.value = v; }, String(n));
+    await page.click("#add-examples");
+    return page.$eval("#new-rows", (t) => t.value.trim().split("\n"));
+  };
+  const predictRows = async () => {
+    await page.click("#predict");
+    await page.waitForFunction(() => /^(Predicted|Predicting failed)/.test(document.getElementById("predict-status").textContent), { timeout: 120000 });
+    return { head: await page.$$eval("#results-head th", (t) => t.map((n) => n.textContent)), body: await page.$$eval("#results-body tr", (trs) => trs.map((tr) => [...tr.children].map((td) => td.textContent))) };
+  };
+  let filled = await fillIn(7);
+  check(filled.length === 8 && filled[0] === "light_hours,water_ml,soil,temperature_c" && filled.slice(1).every((l) => l.split(",").length === 4), `"Fill in" 7 example rows: 7 rows under a header without "outcome" (${await text(page, "#examples-note")})`);
+  let got = await predictRows();
+  console.log("     " + JSON.stringify(got.body.slice(0, 3)));
+  check(got.body.length === 7 && got.head.at(-1) === "Actual" && got.body.every((r) => /^(thrived|survived|died)$/.test(r.at(-1))), "predicting the 7 example rows gives 7 results, each with its true outcome beside it");
+  check((await page.$eval("#results-csv", (t) => t.value)).trim().split("\n")[0] === "prediction,p(died),p(survived),p(thrived)", "the CSV of the results keeps the command line's columns (no Actual)");
+  if (shots) await (await page.$("#h-predict")).evaluate((h) => h.closest("section").id = "predict-section");
+  if (shots) await (await page.$("#predict-section")).screenshot({ path: path.join(shots, "3b-example-rows.png") });
+  await page.$eval("#new-rows", (t) => { t.value = t.value.replace(/\n$/, "\n12,110,loam,22\n"); });
+  got = await predictRows();
+  check(got.body.length === 8 && got.head.at(-1) !== "Actual", "after the rows are edited, no Actual column is shown");
+
   // a number to predict: downloads the second model
   await page.select("#target", "0");
   await page.select("#members", "2");
   await page.click("#fit");
   await page.waitForFunction(() => /^(Done|Fitting failed)/.test(document.getElementById("fit-status").textContent) && !document.getElementById("fit").disabled, { timeout: 300000 });
   check(/^Done/.test(await text(page, "#fit-status")), "a number-predicting model fits too (second model downloaded)");
+  filled = await fillIn(7);
+  check(filled.length === 8 && filled[0] === "water_ml,soil,temperature_c,outcome" && filled.slice(1).every((l) => l.split(",").length === 4), "with the first column to predict, the example rows leave out light_hours instead");
+  got = await predictRows();
+  check(got.body.length === 7 && got.head.at(-1) === "Actual" && got.body.every((r) => r.length === 6 && Number.isFinite(+r[5])), "predicting those gives 7 number predictions with the true light hours beside them");
   await page.$eval("#new-rows", (t) => { t.value = "water_ml,soil,temperature_c,outcome\n110,loam,22,thrived\n20,clay,13,died\n"; });
   await page.click("#predict");
   await page.waitForFunction(() => /^(Predicted|Predicting failed)/.test(document.getElementById("predict-status").textContent), { timeout: 120000 });
