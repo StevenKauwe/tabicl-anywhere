@@ -1,0 +1,10 @@
+{
+  "format": "browsertabicl-parts-1",
+  "bytes": 55344064,
+  "parts": [
+    {"file": "classifier-v2-half.00.bin", "bytes": 14680064},
+    {"file": "classifier-v2-half.01.bin", "bytes": 14680064},
+    {"file": "classifier-v2-half.02.bin", "bytes": 14680064},
+    {"file": "classifier-v2-half.03.bin", "bytes": 11303872}
+  ]
+}

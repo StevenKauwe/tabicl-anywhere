@@ -1,0 +1,10 @@
+{
+  "format": "browsertabicl-parts-1",
+  "bytes": 57296384,
+  "parts": [
+    {"file": "regressor-v2-half.00.bin", "bytes": 14680064},
+    {"file": "regressor-v2-half.01.bin", "bytes": 14680064},
+    {"file": "regressor-v2-half.02.bin", "bytes": 14680064},
+    {"file": "regressor-v2-half.03.bin", "bytes": 13256192}
+  ]
+}

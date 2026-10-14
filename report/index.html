@@ -1,0 +1,240 @@
+<title>BrowserTabICL Field Report</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column; the tape animation is the single loud element, everything else is quiet rows of measured bars. */
+:root{
+  --paper:#eef1f5; --panel:#e2e7ee; --ink:#15213a; --soft:#56627a; --line:#c5cdd9;
+  --tape:#0c7c84; --tape-dim:#9fcacd; --ref:#b96a12; --ref-dim:#e6c9a0; --warn:#a8324e;
+  --display:"Bricolage Grotesque","Arial Narrow",system-ui,sans-serif;
+  --body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --paper:#0f1626; --panel:#18223a; --ink:#e4e9f2; --soft:#98a4bb; --line:#2b3852;
+  --tape:#4cc3c9; --tape-dim:#1f5257; --ref:#e6a04a; --ref-dim:#5a4423; --warn:#ef7f98; color-scheme:dark } }
+:root[data-theme="dark"]{
+  --paper:#0f1626; --panel:#18223a; --ink:#e4e9f2; --soft:#98a4bb; --line:#2b3852;
+  --tape:#4cc3c9; --tape-dim:#1f5257; --ref:#e6a04a; --ref-dim:#5a4423; --warn:#ef7f98; color-scheme:dark }
+body{background:var(--paper);color:var(--ink);font:16px/1.55 var(--body)}
+.wrap{max-width:820px;margin:0 auto;padding-inline:20px;padding-block:36px 64px;display:flex;flex-direction:column;gap:44px}
+h1{font:700 clamp(2rem,6vw,3.3rem)/1.02 var(--display);letter-spacing:-.02em;margin:0;text-wrap:balance}
+h2{font:700 1.45rem/1.15 var(--display);margin:0;text-wrap:balance}
+p{margin:0;max-width:66ch}
+.eyebrow{font:500 .78rem var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--tape)}
+.lede{font-size:1.12rem;color:var(--soft)}
+section{display:flex;flex-direction:column;gap:14px}
+header{display:flex;flex-direction:column;gap:14px}
+.stage{background:var(--panel);border-radius:6px;padding:14px;display:flex;flex-direction:column;gap:10px}
+canvas{width:100%;height:230px;display:block}
+.readout{display:flex;flex-wrap:wrap;gap:8px 28px;font:500 .86rem var(--mono);font-variant-numeric:tabular-nums}
+.readout b{font-weight:500;color:var(--tape)}
+.note{font-size:.88rem;color:var(--soft)}
+.bars{display:flex;flex-direction:column;gap:18px}
+.grp{display:flex;flex-direction:column;gap:6px}
+.grp>span{font-weight:600}
+.row{display:grid;grid-template-columns:118px 1fr;gap:10px;align-items:center;font:400 .84rem var(--mono);font-variant-numeric:tabular-nums}
+.row .lab{color:var(--soft)}
+.track{min-width:0;display:flex;align-items:center;gap:8px}
+.bar{height:16px;border-radius:2px;background:var(--tape);transform-origin:left;animation:grow .9s cubic-bezier(.2,.7,.2,1) both;min-width:2px}
+.bar.r{background:var(--ref)}
+.val{white-space:nowrap}
+@keyframes grow{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+.stack{display:flex;height:34px;border-radius:3px;overflow:hidden;animation:grow 1s cubic-bezier(.2,.7,.2,1) both;transform-origin:left}
+.stack div{height:100%}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font:400 .84rem var(--mono)}
+.legend i{display:inline-block;width:10px;height:10px;margin-right:6px;border-radius:2px}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:.92rem;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:7px 12px 7px 0;border-bottom:1px solid var(--line);vertical-align:top}
+th{font:500 .76rem var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--soft)}
+td.n{font-family:var(--mono);white-space:nowrap}
+.steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:18px}
+.steps div{display:flex;flex-direction:column;gap:4px;min-width:0}
+.steps strong{font:700 1.02rem var(--display)}
+.steps span{font-size:.93rem;color:var(--soft)}
+ul{margin:0;padding-left:1.1em;max-width:66ch}
+li{margin:.25em 0}
+code{font:400 .9em var(--mono)}
+.lost{color:var(--warn)}
+@media (prefers-reduced-motion: reduce){ .bar,.stack{animation:none} }
+</style>
+
+<div class="wrap">
+<header>
+  <span class="eyebrow">BrowserTabICL · measured on an i7-11700K and RTX 3090 · 13 Oct 2026</span>
+  <h1>Half a gigabyte of memory, read through a one-megabyte window</h1>
+  <p class="lede">An independent Rust implementation of the TabICL v2 tabular model, for classification and regression. It gives the same answers as the published PyTorch code, predicts while holding about 12 MB because everything it learned about the training table stays on disk and is played past like tape, and also runs in a browser as 1.4 MB of WebAssembly.</p>
+</header>
+
+<section>
+  <div class="stage">
+    <canvas id="tape" aria-label="Animation: the cache streams past a small window, layer by layer, while memory in use stays flat"></canvas>
+    <div class="readout">
+      <span>layer <b id="rl">1</b> of 12</span>
+      <span>read so far <b id="rr">0</b> of 491 MB</span>
+      <span>held in memory <b>12 MB</b></span>
+    </div>
+  </div>
+  <p class="note">One prediction against 10,000 training rows of 100 features. Each of the model's 12 in-context layers needs every training row's keys and values, 41 MB per layer. The whole 491 MB goes past in chunks of 256 rows; only the running totals are kept.</p>
+</section>
+
+<section>
+  <span class="eyebrow">Side by side</span>
+  <h2>Against the reference, same machine, same table</h2>
+  <p>10,000 × 100 training table, 10 classes, one ensemble member. Teal is BrowserTabICL, amber is the PyTorch reference on CPU. Bars within a group share a scale.</p>
+  <div class="bars">
+    <div class="grp"><span>Peak memory</span>
+      <div class="row"><span class="lab">predict</span><div class="track"><div class="bar" style="width:.3%"></div><span class="val">12 MB</span></div></div>
+      <div class="row"><span class="lab">fit</span><div class="track"><div class="bar" style="width:3.5%"></div><span class="val">263 MB</span></div></div>
+      <div class="row"><span class="lab">reference</span><div class="track"><div class="bar r" style="width:84%"></div><span class="val">6,326 MB</span></div></div>
+    </div>
+    <div class="grp"><span>Fit the table</span>
+      <div class="row"><span class="lab">CPU</span><div class="track"><div class="bar" style="width:35%"></div><span class="val">22.7 s</span></div></div>
+      <div class="row"><span class="lab">with RTX 3090</span><div class="track"><div class="bar" style="width:21%"></div><span class="val">13.8 s</span></div></div>
+      <div class="row"><span class="lab">ref, 16 threads</span><div class="track"><div class="bar r" style="width:32%"></div><span class="val">20.5 s</span></div></div>
+      <div class="row"><span class="lab">ref, 1 thread</span><div class="track"><div class="bar r" style="width:84%"></div><span class="val">54.6 s</span></div></div>
+    </div>
+    <div class="grp"><span>Predict one row</span>
+      <div class="row"><span class="lab">from disk, f32</span><div class="track"><div class="bar" style="width:84%"></div><span class="val">57 ms</span></div></div>
+      <div class="row"><span class="lab">from disk, i8</span><div class="track"><div class="bar" style="width:62%"></div><span class="val">42 ms</span></div></div>
+      <div class="row"><span class="lab">disk, 4 readers</span><div class="track"><div class="bar" style="width:44%"></div><span class="val">30 ms</span></div></div>
+      <div class="row"><span class="lab">warm, 4 threads</span><div class="track"><div class="bar" style="width:32%"></div><span class="val">22 ms</span></div></div>
+      <div class="row"><span class="lab">ref, 1 thread</span><div class="track"><div class="bar r" style="width:46%"></div><span class="val">31 ms</span></div></div>
+    </div>
+    <div class="grp"><span>Predict 64 rows together</span>
+      <div class="row"><span class="lab">from disk</span><div class="track"><div class="bar" style="width:46%"></div><span class="val">174 ms</span></div></div>
+      <div class="row"><span class="lab">warm</span><div class="track"><div class="bar" style="width:38%"></div><span class="val">145 ms</span></div></div>
+      <div class="row"><span class="lab">ref, 16 threads</span><div class="track"><div class="bar r" style="width:23%"></div><span class="val">88 ms</span></div></div>
+      <div class="row"><span class="lab">ref, 1 thread</span><div class="track"><div class="bar r" style="width:84%"></div><span class="val">321 ms</span></div></div>
+    </div>
+  </div>
+  <p class="note">The reference keeps the cache in RAM, so it never pays to read it. Its 6.3 GB is the peak of the whole process, fit included; its memory during prediction alone was not measured. "From disk" rows hold about 12 MB; "warm" rows keep the cache in RAM (the optional in-memory tier), which costs its size in memory. On batches the reference is still about twice as fast: its matrix library is better than these kernels.</p>
+</section>
+
+<section>
+  <span class="eyebrow">Where the time goes</span>
+  <h2>One row, 57 ms, mostly waiting on bytes</h2>
+  <div class="stack">
+    <div style="width:55%;background:var(--tape)"></div>
+    <div style="width:20%;background:var(--tape-dim)"></div>
+    <div style="width:10%;background:var(--ref)"></div>
+    <div style="width:11%;background:var(--ref-dim)"></div>
+    <div style="width:4%;background:var(--soft)"></div>
+  </div>
+  <div class="legend">
+    <span><i style="background:var(--tape)"></i>reading the cache 31</span>
+    <span><i style="background:var(--tape-dim)"></i>attention over it 11</span>
+    <span><i style="background:var(--ref)"></i>reading weights 6</span>
+    <span><i style="background:var(--ref-dim)"></i>column stage 7</span>
+    <span><i style="background:var(--soft)"></i>row stage 2</span>
+  </div>
+  <p>Reading already runs at memory speed (about 16 GB/s from the page cache), so the lever is fewer bytes. That is what the smaller cache formats are for.</p>
+  <div class="scroll"><table>
+    <tr><th>Cache format</th><th>Size</th><th>One row, 1 thread</th><th>4 readers</th><th>Change in output</th></tr>
+    <tr><td>32-bit float</td><td class="n">531 MB</td><td class="n">57 ms</td><td class="n">40 ms</td><td>none (as fitted)</td></tr>
+    <tr><td>16-bit integer</td><td class="n">287 MB</td><td class="n">48 ms</td><td class="n">30 ms</td><td class="n">0.0001</td></tr>
+    <tr><td>8-bit integer</td><td class="n">164 MB</td><td class="n">42 ms</td><td class="n">29 ms</td><td class="n">0.011</td></tr>
+    <tr><td>16-bit, encrypted</td><td class="n">287 MB</td><td class="n lost">261 ms</td><td class="n lost">116 ms (8 readers)</td><td class="n">0.0001</td></tr>
+  </table></div>
+  <p class="note">Change in output is the largest shift in any raw class score (scores run to about ±10). All formats picked the same class on all 64 test rows. Encryption costs real time: every block has to be checked and opened.</p>
+</section>
+
+<section>
+  <span class="eyebrow">Is it the same model?</span>
+  <h2>Checked number by number against the reference</h2>
+  <div class="scroll"><table>
+    <tr><th>Compared</th><th>Largest difference</th></tr>
+    <tr><td>Preprocessing, plain variant</td><td class="n">1 × 10⁻¹⁴</td></tr>
+    <tr><td>Preprocessing with the power transform</td><td class="n">7 × 10⁻⁸</td></tr>
+    <tr><td>Every cached key and value, and raw scores</td><td class="n">5 × 10⁻⁵</td></tr>
+    <tr><td>Final probabilities, 8-member ensemble, missing cells, skewed columns</td><td class="n">2 × 10⁻⁶</td></tr>
+    <tr><td>14 and 120 classes</td><td class="n">2 × 10⁻⁵</td></tr>
+    <tr><td>Regression: mean, variance, median, quantiles including tails</td><td class="n">6 × 10⁻⁵</td></tr>
+    <tr><td>The WebAssembly build, run under Node</td><td class="n">2 × 10⁻⁶</td></tr>
+    <tr><td>Reading the published checkpoint without Python</td><td class="n">byte-identical</td></tr>
+  </table></div>
+  <p class="note">For scale: the reference's own cached and uncached paths disagree by 5 × 10⁻⁶. The ensemble's column shuffles reproduce Python's random generator, so all 8 members match one for one.</p>
+</section>
+
+<section>
+  <span class="eyebrow">How it works</span>
+  <h2>Three stages, one file</h2>
+  <div class="steps">
+    <div><strong>Columns</strong><span>Each cell is described relative to its column. Per column, 128 summary points are stored at fit time (393 KB a column); a new cell consults only those.</span></div>
+    <div><strong>Rows</strong><span>A row's 100 cells talk to each other and condense into one 512-number description. Needs nothing from the training table.</span></div>
+    <div><strong>In context</strong><span>The new row compares itself with every training row, 12 times over. This is the tape: 98% of the file.</span></div>
+  </div>
+  <ul>
+    <li><b>Running average instead of a table.</b> Attention is a weighted average over all training rows. Keeping the largest score seen, the total weight and the weighted sum lets rows arrive in pieces and be forgotten.</li>
+    <li><b>Laid out in reading order.</b> The file is written in the order prediction consumes it, and read through a "bytes X to Y" interface: a local file, bytes in memory, or object storage such as S3.</li>
+    <li><b>Batches share a pass.</b> 64 rows cost one trip through the cache, not 64: 2.9 ms a row.</li>
+    <li><b>Sealing.</b> The file is cut into 64 KB blocks, each encrypted and tamper-checked on its own, so any range can still be fetched and opened alone.</li>
+    <li><b>Warm tier.</b> Optionally, pieces that stream past are kept in memory and used in place next time. Every entry belongs to one tenant and model, each tenant has its own byte budget, and nothing is freed while a prediction still uses it.</li>
+    <li><b>Graphics card.</b> One portable shader (Vulkan, Metal, DirectX; the same language browsers use) does the step of fitting that grows with the square of the table.</li>
+    <li><b>Safe Rust only.</b> <code>#![forbid(unsafe_code)]</code>; one set of kernels compiles to AVX2, NEON or plain code and picks at run time.</li>
+  </ul>
+</section>
+
+<section>
+  <span class="eyebrow">Open items</span>
+  <h2>Not built yet</h2>
+  <ul>
+    <li>Prediction on the graphics card, which needs the cache resident in its memory, and the remaining stages of fitting.</li>
+    <li>Graphics acceleration inside the browser, plus browser threads and a demo page. The WebAssembly build is single-threaded and has been checked under Node, not yet in a browser.</li>
+    <li>Training the network's own weights (pre-training or fine-tuning). "Fit" here means preparing a table, as in the reference.</li>
+    <li>Batch speed: the reference is still about twice as fast on 64 rows.</li>
+  </ul>
+</section>
+</div>
+
+<script>
+(function(){
+  const cv=document.getElementById('tape'), ctx=cv.getContext('2d');
+  const rl=document.getElementById('rl'), rr=document.getElementById('rr');
+  const still=matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const tok=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  let W=0,H=0;
+  function size(){const d=devicePixelRatio||1;W=cv.clientWidth;H=cv.clientHeight;cv.width=W*d;cv.height=H*d;ctx.setTransform(d,0,0,d,0,0);}
+  const CH=40, LAYERS=12, DUR=9000;
+  function draw(p){
+    const c={tape:tok('--tape'),dim:tok('--tape-dim'),ink:tok('--ink'),soft:tok('--soft'),line:tok('--line'),ref:tok('--ref'),paper:tok('--paper')};
+    ctx.clearRect(0,0,W,H);
+    const lp=p*LAYERS, layer=Math.min(LAYERS-1,Math.floor(lp)), f=lp-layer;
+    const bw=Math.max(14,Math.min(26,W/26)), gap=4, step=bw+gap, cx=W/2, y=34, bh=54;
+    const pos=f*CH;
+    ctx.font='500 12px "IBM Plex Mono",monospace'; ctx.textBaseline='middle';
+    for(let i=0;i<CH;i++){
+      const x=cx+(i-pos)*step-bw/2;
+      if(x<-bw||x>W) continue;
+      const done=i<Math.floor(pos), now=i===Math.floor(pos);
+      ctx.fillStyle=now?c.tape:c.dim; ctx.globalAlpha=done?0.35:1;
+      ctx.fillRect(x,y,bw,bh/2-2); ctx.fillRect(x,y+bh/2+1,bw,bh/2-2);
+      ctx.globalAlpha=1;
+    }
+    ctx.fillStyle=c.soft; ctx.textAlign='left';
+    ctx.fillText('keys',6,y-12); ctx.fillText('values',64,y-12);
+    ctx.textAlign='right'; ctx.fillText('on disk: 40 chunks × 12 layers',W-6,y-12);
+    // the window
+    ctx.strokeStyle=c.ink; ctx.lineWidth=2; ctx.strokeRect(cx-bw/2-5,y-6,bw+10,bh+12);
+    ctx.textAlign='center'; ctx.fillStyle=c.ink; ctx.fillText('1 MB in memory',cx,y+bh+22);
+    // running totals: 8 heads
+    const ty=y+bh+48, n=8, tw=Math.min(34,(W-40)/n-6), x0=cx-(n*(tw+6)-6)/2;
+    for(let h=0;h<n;h++){
+      const lvl=0.25+0.75*Math.abs(Math.sin((h*1.7+layer*0.9+1)*1.3))*(0.15+0.85*f);
+      ctx.fillStyle=c.line; ctx.fillRect(x0+h*(tw+6),ty,tw,40);
+      ctx.fillStyle=c.ref; ctx.fillRect(x0+h*(tw+6),ty+40*(1-lvl),tw,40*lvl);
+    }
+    ctx.fillStyle=c.soft; ctx.fillText('running weighted averages, one per attention head (2 KB)',cx,ty+56);
+    // layer ticks
+    const ly=H-10, lw=(W-12)/LAYERS;
+    for(let l=0;l<LAYERS;l++){ctx.fillStyle=l<layer?c.tape:(l===layer?c.tape:c.line);ctx.globalAlpha=l===layer?1:(l<layer?0.5:1);ctx.fillRect(6+l*lw,ly,(l===layer?f:1)*(lw-3),4);ctx.globalAlpha=1;if(l===layer){ctx.fillStyle=c.line;ctx.fillRect(6+l*lw+f*(lw-3),ly,(1-f)*(lw-3),4);}}
+    rl.textContent=layer+1; rr.textContent=Math.round(p*491);
+  }
+  let t0=null;
+  function frame(t){ if(t0===null)t0=t; draw(((t-t0)%DUR)/DUR); requestAnimationFrame(frame); }
+  function start(){ size(); if(still){draw(0.37);} else requestAnimationFrame(frame); }
+  addEventListener('resize',()=>{size(); if(still)draw(0.37);});
+  if(document.fonts&&document.fonts.ready){document.fonts.ready.then(start);} else start();
+  size(); draw(0.37);
+})();
+</script>

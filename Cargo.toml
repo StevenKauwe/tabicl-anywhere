@@ -1,0 +1,44 @@
+[package]
+name = "browsertabicl"
+version = "0.1.0"
+edition = "2021"
+description = "BrowserTabICL: an independent safe-Rust implementation of the TabICL v2 tabular model that fits, caches to disk and predicts by streaming the cache; runs natively and in the browser"
+license = "BSD-3-Clause"
+
+[workspace]
+members = [".", "wasm"]
+
+[lib]
+name = "browsertabicl"
+
+[[bin]]
+name = "browsertabicl"
+path = "src/bin/browsertabicl.rs"
+
+[dependencies]
+pulp = { version = "0.22", features = ["x86-v4"] }
+rayon = "1"
+bytemuck = { version = "1", features = ["extern_crate_alloc"] }
+libm = "0.2"
+chacha20poly1305 = "0.10"
+getrandom = "0.2"
+web-time = "1"
+wgpu = { version = "30.0.1", optional = true }
+pollster = { version = "1.0.1", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = 1
+
+[dev-dependencies]
+bytemuck = { version = "1", features = ["extern_crate_alloc"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+[features]
+# Graphics-card acceleration (Vulkan, Metal, DirectX through wgpu). Off by default: the default build has no GPU code.
+gpu = ["dep:wgpu", "dep:pollster"]

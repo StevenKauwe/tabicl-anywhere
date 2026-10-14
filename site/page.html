@@ -1,0 +1,295 @@
+<title>BrowserTabICL</title>
+<style>
+  /* Layout: one reading column of four numbered steps (a real sequence: get the model, give a table, fit, predict);
+     tables scroll inside their own boxes; status lines sit directly under the control that caused them. */
+  :root {
+    --bg: #f3f5f8;
+    --surface: #ffffff;
+    --ink: #17212e;
+    --muted: #55637a;
+    --line: #d3dae4;
+    --accent: #1b4fcf;
+    --accent-ink: #ffffff;
+    --accent-soft: #e4ebfb;
+    --ok: #17703f;
+    --warn-bg: #fff3d6;
+    --warn-ink: #6b4700;
+    --bad-bg: #fde5e3;
+    --bad-ink: #8f1d15;
+    --font-body: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-head: Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif;
+    --font-data: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #10161f; --surface: #18212d; --ink: #e6ebf3; --muted: #9aa8bd; --line: #2e3b4d;
+      --accent: #8fb0ff; --accent-ink: #0c1730; --accent-soft: #1f2e4d;
+      --ok: #6fd39a; --warn-bg: #3b2f10; --warn-ink: #ffd98a; --bad-bg: #44201d; --bad-ink: #ffb4ab;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #10161f; --surface: #18212d; --ink: #e6ebf3; --muted: #9aa8bd; --line: #2e3b4d;
+    --accent: #8fb0ff; --accent-ink: #0c1730; --accent-soft: #1f2e4d;
+    --ok: #6fd39a; --warn-bg: #3b2f10; --warn-ink: #ffd98a; --bad-bg: #44201d; --bad-ink: #ffb4ab;
+    color-scheme: dark;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 1rem/1.55 var(--font-body); overflow-wrap: anywhere; }
+  #app { max-width: 46rem; margin-inline: auto; padding-inline: 1rem; padding-block: 2rem 4rem; display: flex; flex-direction: column; gap: 1.75rem; }
+  h1, h2 { font-family: var(--font-head); text-wrap: balance; margin: 0; line-height: 1.2; }
+  h1 { font-size: 2rem; }
+  h2 { font-size: 1.3rem; display: flex; gap: 0.6rem; align-items: baseline; }
+  h2 .step { font: 600 0.8rem var(--font-data); color: var(--accent); border: 1px solid var(--accent); border-radius: 999px; padding: 0.1rem 0.5rem; flex: none; }
+  p { margin: 0; }
+  .lede { font-size: 1.1rem; max-width: 38rem; }
+  .muted, .note { color: var(--muted); font-size: 0.92rem; }
+  header, section { display: flex; flex-direction: column; gap: 0.8rem; min-width: 0; }
+  section { background: var(--surface); border: 1px solid var(--line); border-radius: 0.5rem; padding: 1.25rem; }
+  .private { border-left: 3px solid var(--accent); padding-left: 0.9rem; max-width: 38rem; }
+  .facts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.25rem; }
+  .facts li { color: var(--muted); font-size: 0.92rem; }
+  [data-tone="ok"] { color: var(--ok); }
+  [data-tone="warn"], [data-tone="bad"] { border-radius: 0.35rem; padding: 0.5rem 0.7rem; }
+  [data-tone="warn"] { background: var(--warn-bg); color: var(--warn-ink); }
+  [data-tone="bad"] { background: var(--bad-bg); color: var(--bad-ink); }
+  .facts li[data-tone="ok"] { color: var(--muted); }
+  #warnings, #estimate { display: flex; flex-direction: column; gap: 0.4rem; }
+  #estimate { background: var(--accent-soft); border-radius: 0.35rem; padding: 0.7rem 0.9rem; }
+
+  button, select, input, textarea { font: inherit; color: inherit; }
+  button, .filebutton { border: 1px solid var(--line); background: var(--surface); border-radius: 0.35rem; padding: 0.45rem 0.9rem; cursor: pointer; }
+  button:hover:not(:disabled), .filebutton:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  button.danger { background: var(--bad-bg); color: var(--bad-ink); border-color: var(--bad-ink); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  select, input[type="text"], textarea { border: 1px solid var(--line); background: var(--bg); border-radius: 0.35rem; padding: 0.4rem 0.6rem; max-width: 100%; }
+  textarea { width: 100%; min-height: 8rem; font: 0.85rem/1.45 var(--font-data); resize: vertical; }
+  :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .filebutton:focus-within { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .filebutton { display: inline-block; position: relative; }
+  .filebutton input { position: absolute; inset: 0; opacity: 0; width: 100%; cursor: pointer; }
+  .filebutton:has(input:disabled) { opacity: 0.5; cursor: not-allowed; }
+  .row { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
+  .field { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
+  .field > label, legend { font-weight: 600; }
+  fieldset { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
+  .choice { display: flex; gap: 0.5rem; align-items: baseline; }
+  progress { width: 100%; height: 0.6rem; accent-color: var(--accent); }
+
+  #drop { border: 2px dashed var(--line); border-radius: 0.5rem; padding: 1.1rem; display: flex; flex-direction: column; gap: 0.7rem; align-items: flex-start; }
+  #drop.over { border-color: var(--accent); background: var(--accent-soft); }
+  #table-details { display: flex; flex-direction: column; gap: 1rem; }
+  .scroll { overflow-x: auto; max-height: 20rem; overflow-y: auto; border: 1px solid var(--line); border-radius: 0.35rem; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+  th, td { text-align: left; padding: 0.35rem 0.6rem; border-bottom: 1px solid var(--line); white-space: nowrap; overflow-wrap: normal; }
+  thead th { position: sticky; top: 0; background: var(--surface); font-weight: 600; }
+  td.num, th.num { text-align: right; font-family: var(--font-data); font-variant-numeric: tabular-nums; }
+  td.examples { color: var(--muted); max-width: 16rem; overflow: hidden; text-overflow: ellipsis; }
+
+  .weights { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
+  .weights li { display: grid; grid-template-columns: 1fr auto; gap: 0.3rem 0.8rem; align-items: center; }
+  .weights .what { min-width: 0; }
+  .weights .state { color: var(--muted); font-size: 0.92rem; }
+  .weights li[data-have="yes"] .state { color: var(--ok); }
+  .weights progress, .weights .note { grid-column: 1 / -1; }
+
+  #models { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
+  .model { border: 1px solid var(--line); border-radius: 0.35rem; padding: 0.7rem 0.9rem; display: flex; flex-direction: column; gap: 0.4rem; }
+  .model.chosen { border-color: var(--accent); background: var(--accent-soft); }
+  .model-head { display: flex; justify-content: space-between; gap: 0.8rem; align-items: baseline; }
+  .pick { display: flex; gap: 0.5rem; align-items: baseline; min-width: 0; cursor: pointer; }
+  .model-name { font-weight: 600; }
+  .model-size { font-family: var(--font-data); font-size: 0.88rem; flex: none; }
+  .model-facts { color: var(--muted); font-size: 0.92rem; }
+  .model-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; font-size: 0.92rem; }
+  details summary { cursor: pointer; font-weight: 600; }
+  .licence { white-space: pre-wrap; font: 0.8rem/1.45 var(--font-data); margin: 0.6rem 0 0; }
+  footer { display: flex; flex-direction: column; gap: 0.6rem; }
+  h3 { font-size: 1rem; margin: 0.6rem 0 0; }
+  details > div { display: flex; flex-direction: column; gap: 0.8rem; padding-top: 0.8rem; }
+  @media (prefers-reduced-motion: no-preference) { button, #drop { transition: border-color 0.15s, background-color 0.15s; } }
+</style>
+
+<!-- The one setting: where the model weights are fetched from.
+     "weights/"  = the half-size copy published next to this page, in parts (see README.md).
+     "https://huggingface.co/jingang/TabICL/resolve/main/" = the authors' published files (110 MB each),
+     converted to half size in the browser. Not possible where the page may only fetch its own files. -->
+<main id="app" data-weights="weights/">
+  <header>
+    <h1>BrowserTabICL</h1>
+    <p class="lede">Teach a model from a table of examples, then ask it about new rows. It all happens in this browser tab.</p>
+    <p class="private">Your data never leaves this browser. The table you choose is read and worked on by your own computer; nothing is uploaded, and there is no server behind this page to receive it. The only thing fetched from the internet is the general-purpose model itself, which knows nothing about you. What you fit is stored in this browser only, until you delete it or its time runs out.</p>
+    <ul class="facts" aria-live="polite">
+      <li id="hw-engine">Starting the prediction engine.</li>
+      <li id="hw-gpu">Looking for a graphics card.</li>
+    </ul>
+    <div id="engine-error" data-tone="bad" hidden>
+      <p><strong>The prediction engine could not start here.</strong> This page needs WebAssembly and background workers, loaded from the files published next to it. Try a current version of Chrome, Edge, Firefox or Safari, and if this page is shown inside another site or app, open it directly in the browser. <span class="note" id="engine-error-detail"></span></p>
+    </div>
+  </header>
+
+  <section aria-labelledby="h-weights">
+    <h2 id="h-weights"><span class="step">1</span>The model</h2>
+    <p class="muted">A ready-trained model does the work. It is downloaded once and then kept in this browser, so later visits start at once. It is fetched automatically when first needed; you can also fetch it now.</p>
+    <ul class="weights">
+      <li id="weights-classifier" data-have="no">
+        <span class="what"><strong>For choosing between categories</strong> <span class="state">checking</span></span>
+        <span class="row"><button type="button" class="get" id="get-classifier" data-busy-off hidden>Download (55 MB)</button><button type="button" class="drop" id="drop-classifier" data-busy-off hidden>Remove</button></span>
+        <progress hidden></progress><span class="note"></span>
+      </li>
+      <li id="weights-regressor" data-have="no">
+        <span class="what"><strong>For predicting a number</strong> <span class="state">checking</span></span>
+        <span class="row"><button type="button" class="get" id="get-regressor" data-busy-off hidden>Download (57 MB)</button><button type="button" class="drop" id="drop-regressor" data-busy-off hidden>Remove</button></span>
+        <progress hidden></progress><span class="note"></span>
+      </li>
+    </ul>
+  </section>
+
+  <section aria-labelledby="h-table">
+    <h2 id="h-table"><span class="step">2</span>Your table of examples</h2>
+    <div id="drop">
+      <p>Drop a CSV file here, or choose one. The first line must hold the column names. One column is what you want predicted; the others are what to predict it from. Text columns and empty cells are fine.</p>
+      <div class="row">
+        <label class="filebutton">Choose a CSV file<input type="file" id="file" accept=".csv,text/csv,text/plain" data-needs-engine disabled></label>
+        <button type="button" id="sample" data-needs-engine disabled>Try an example table</button>
+      </div>
+    </div>
+    <p id="table-error" hidden></p>
+    <div id="table-details" hidden>
+      <p id="table-name" class="muted"></p>
+      <div class="scroll" tabindex="0" role="region" aria-label="Columns of the table">
+        <table>
+          <thead><tr><th scope="col">Column</th><th scope="col">Holds</th><th scope="col" class="num">Different values</th><th scope="col" class="num">Empty cells</th><th scope="col">Examples</th></tr></thead>
+          <tbody id="columns-body"></tbody>
+        </table>
+      </div>
+      <div class="field">
+        <label for="target">Column to predict</label>
+        <select id="target" data-busy-off></select>
+      </div>
+      <fieldset>
+        <legend>It holds</legend>
+        <label class="choice"><input type="radio" name="kind" id="kind-classifier" value="classifier" checked data-busy-off><span>A category (yes / no, a type, a grade). The answer is one of the values seen, with a chance for each.</span></label>
+        <label class="choice"><input type="radio" name="kind" id="kind-regressor" value="regressor" data-busy-off><span>A number (a price, a weight, a duration). The answer is a number with a likely range.</span></label>
+      </fieldset>
+      <div class="field">
+        <label for="members">Members</label>
+        <select id="members" data-busy-off>
+          <option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option>
+          <option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option>
+        </select>
+        <p class="note">The model looks at your table several times with the columns shuffled, and averages the answers. More members give steadier answers and take proportionally more time and storage. The number is preset to suit the size of your table.</p>
+      </div>
+      <details>
+        <summary>More options</summary>
+        <div>
+          <div class="field">
+            <label for="model-name">Name for the fitted model</label>
+            <input type="text" id="model-name" maxlength="80" autocomplete="off" data-busy-off>
+          </div>
+          <div class="field">
+            <label for="expiry">Keep it for</label>
+            <select id="expiry" data-busy-off>
+              <option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option><option value="0">until I delete it</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="precision">How it is stored</label>
+            <select id="precision" data-busy-off>
+              <option value="i16" selected>Compact (recommended)</option>
+              <option value="f32">Full precision (about twice the storage)</option>
+            </select>
+            <p class="note">Compact storage changes answers only in the fourth decimal place or beyond.</p>
+          </div>
+        </div>
+      </details>
+      <div id="estimate" aria-live="polite"></div>
+      <div id="warnings" hidden></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-fit">
+    <h2 id="h-fit"><span class="step">3</span>Fit</h2>
+    <p class="muted">Fitting runs your table through the model once and keeps the result, called a fitted model, in this browser. The page stays usable while it works.</p>
+    <div class="row">
+      <button type="button" class="primary" id="fit" disabled>Fit the model</button>
+      <button type="button" id="cancel" hidden>Stop</button>
+    </div>
+    <progress id="fit-bar" hidden></progress>
+    <p id="fit-status" aria-live="polite" hidden></p>
+    <h3>Fitted models in this browser</h3>
+    <p id="no-models" class="muted">None yet. Fitted models are listed here and are still here when you come back.</p>
+    <ul id="models"></ul>
+    <p id="expired-note" class="note" hidden></p>
+    <p id="storage-line" class="note" hidden></p>
+  </section>
+
+  <section aria-labelledby="h-predict">
+    <h2 id="h-predict"><span class="step">4</span>Predict</h2>
+    <p id="predict-with" class="muted">Choose a fitted model above, or fit one first.</p>
+    <p id="predict-columns" class="note"></p>
+    <div class="field">
+      <label for="new-rows">New rows</label>
+      <textarea id="new-rows" spellcheck="false" placeholder="Paste rows here, header line first"></textarea>
+    </div>
+    <div class="row">
+      <label class="filebutton">Or choose a CSV file<input type="file" id="rows-file" accept=".csv,text/csv,text/plain"></label>
+      <button type="button" class="primary" id="predict" disabled>Predict</button>
+    </div>
+    <p id="predict-status" aria-live="polite" hidden></p>
+    <div id="results" class="field" hidden>
+      <div class="scroll" tabindex="0" role="region" aria-label="Predictions">
+        <table><thead id="results-head"></thead><tbody id="results-body"></tbody></table>
+      </div>
+      <p id="results-note" class="note"></p>
+      <div class="row">
+        <button type="button" id="copy">Copy as CSV</button>
+        <button type="button" id="download" hidden>Download CSV</button>
+      </div>
+      <p id="copy-note" aria-live="polite" hidden></p>
+      <div id="results-csv-wrap" class="field" hidden>
+        <label for="results-csv">Predictions as CSV</label>
+        <textarea id="results-csv" readonly spellcheck="false"></textarea>
+      </div>
+    </div>
+  </section>
+
+  <footer class="note">
+    <p>The model is TabICL v2 by Jingang Qu, David Holzm&uuml;ller, Ga&euml;l Varoquaux and Marine Le Morvan (Soda team, Inria), released under the BSD 3-Clause licence, Copyright (c) 2025, Soda team @ Inria. This page runs it with BrowserTabICL, an independent implementation in Rust compiled to WebAssembly, using a copy of the published weights stored at half precision. Predictions are estimates; check them before relying on them.</p>
+    <details>
+      <summary>Licence of the model weights</summary>
+      <pre class="licence">BSD 3-Clause License
+
+Copyright (c) 2025, Soda team @ Inria
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS &quot;AS IS&quot;
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.</pre>
+    </details>
+  </footer>
+</main>
+<script type="module" src="app.js"></script>
